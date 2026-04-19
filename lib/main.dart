@@ -121,11 +121,13 @@ class ParsedCompanyDial {
   final Map<String, int> departures;
   final List<ParsedDepartureRow> departureRows;
   final List<ParsedArrivalRow> arrivals;
+  final String? okdongReserveFromG35;
 
   const ParsedCompanyDial({
     required this.departures,
     required this.departureRows,
     required this.arrivals,
+    required this.okdongReserveFromG35,
   });
 }
 
@@ -177,6 +179,8 @@ class _MainScreenState extends State<MainScreen> {
   List<Train> trains = _initialTrains();
   Uint8List? uploadedTodayDialBytes;
   ParsedCompanyDial? parsedTodayDial;
+  Uint8List? uploadedTomorrowDialBytes;
+  ParsedCompanyDial? parsedTomorrowDial;
   List<TomorrowAssignment> tomorrowAssignments = const [];
   Set<String> okdongForbidden = {};
   ViewMode viewMode = ViewMode.dial;
@@ -220,6 +224,8 @@ class _MainScreenState extends State<MainScreen> {
           setState(() {
             uploadedTodayDialBytes = bytes;
             parsedTodayDial = parsed;
+            uploadedTomorrowDialBytes = null;
+            parsedTomorrowDial = null;
             trains = TrainAutoMapper.applyTodayInfoBulk(trains, parsed);
             okdongForbidden = {
               for (final t in trains)
@@ -230,11 +236,41 @@ class _MainScreenState extends State<MainScreen> {
             };
             tomorrowAssignments = const [];
             message =
-                '업로드 완료 / 출고 ${parsed.departures.length}건 / 입고 ${parsed.arrivals.length}건 / 자동복원 완료';
+                '금일 업로드 완료 / 출고 ${parsed.departures.length}건 / 입고 ${parsed.arrivals.length}건 / 자동복원 완료';
           });
         } catch (e) {
           setState(() {
-            message = '업로드 오류: $e';
+            message = '금일 업로드 오류: $e';
+          });
+        }
+      });
+    });
+
+    input.click();
+  }
+
+  void _uploadTomorrowDial() {
+    final input = html.FileUploadInputElement()..accept = '.xlsx';
+
+    input.onChange.listen((event) {
+      if (input.files == null || input.files!.isEmpty) return;
+
+      final file = input.files!.first;
+      final reader = html.FileReader();
+      reader.readAsArrayBuffer(file);
+
+      reader.onLoadEnd.listen((event) {
+        try {
+          final bytes = _toBytes(reader.result);
+          final parsed = CompanyDialParser.parse(bytes);
+          setState(() {
+            uploadedTomorrowDialBytes = bytes;
+            parsedTomorrowDial = parsed;
+            message = '명일 업로드 완료 / 출고 ${parsed.departures.length}건 / 입고 ${parsed.arrivals.length}건';
+          });
+        } catch (e) {
+          setState(() {
+            message = '명일 업로드 오류: $e';
           });
         }
       });
@@ -315,10 +351,12 @@ class _MainScreenState extends State<MainScreen> {
     }
 
     try {
-      final parkingResult = DoubleParkingEngine.simulate(
-        todayDial: parsedTodayDial!,
-        tomorrowAssignments: tomorrowAssignments,
-      );
+      final parkingResult = parsedTomorrowDial == null
+          ? null
+          : DoubleParkingEngine.simulate(
+              todayDial: parsedTodayDial!,
+              tomorrowDial: parsedTomorrowDial!,
+            );
       final bytes = CompanyExcelWriter.write(
         templateBytes: uploadedTodayDialBytes!,
         assignments: tomorrowAssignments,
@@ -331,7 +369,7 @@ class _MainScreenState extends State<MainScreen> {
         ..click();
       html.Url.revokeObjectUrl(url);
 
-      setState(() => message = '회사 엑셀 양식 저장 완료 / 이중주차 시뮬레이터 결과 포함');
+      setState(() => message = parkingResult == null ? '회사 엑셀 양식 저장 완료' : '회사 엑셀 양식 저장 완료 / 이중주차 결과 포함');
     } catch (e) {
       setState(() => message = '엑셀 저장 오류: $e');
     }
@@ -342,6 +380,8 @@ class _MainScreenState extends State<MainScreen> {
       trains = _initialTrains();
       uploadedTodayDialBytes = null;
       parsedTodayDial = null;
+      uploadedTomorrowDialBytes = null;
+      parsedTomorrowDial = null;
       tomorrowAssignments = const [];
       okdongForbidden.clear();
       viewMode = ViewMode.dial;
@@ -358,6 +398,11 @@ class _MainScreenState extends State<MainScreen> {
           FilledButton(
             onPressed: _uploadTodayDial,
             child: const Text('오늘 다이얼 업로드', style: TextStyle(fontSize: 16)),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: _uploadTomorrowDial,
+            child: const Text('명일 다이얼 업로드', style: TextStyle(fontSize: 16)),
           ),
           const SizedBox(width: 8),
           FilledButton.tonal(
@@ -576,10 +621,10 @@ class _MainScreenState extends State<MainScreen> {
         ),
       );
     }
-    if (tomorrowAssignments.isEmpty) {
+    if (parsedTomorrowDial == null) {
       return const Center(
         child: Text(
-          '명일 다이얼 생성 후 시뮬레이션이 가능합니다.',
+          '명일 다이얼 업로드 후 시뮬레이션이 가능합니다.',
           style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
         ),
       );
@@ -587,7 +632,7 @@ class _MainScreenState extends State<MainScreen> {
 
     final result = DoubleParkingEngine.simulate(
       todayDial: parsedTodayDial!,
-      tomorrowAssignments: tomorrowAssignments,
+      tomorrowDial: parsedTomorrowDial!,
     );
 
     return ListView(
@@ -787,6 +832,15 @@ class XlsxSheetDoc {
   dynamic readCellValue(XmlElement row, int columnIndex) {
     final cell = _findCellByColumn(row, columnIndex);
     return _readCellValue(cell, sharedStrings);
+  }
+
+  dynamic readByRef(String cellRef) {
+    final rowNum = _rowNumberFromRef(cellRef);
+    final colIndex = _columnIndexFromRef(cellRef);
+    if (rowNum < 1 || colIndex < 0) return null;
+    final row = firstOrNull(rows.where((r) => rowNumber(r) == rowNum));
+    if (row == null) return null;
+    return readCellValue(row, colIndex);
   }
 
   void writeCell(XmlElement row, int columnIndex, Object? value, {required bool asText}) {
@@ -1041,6 +1095,11 @@ class XlsxSheetDoc {
     return result - 1;
   }
 
+  static int _rowNumberFromRef(String cellRef) {
+    final digits = cellRef.replaceAll(RegExp(r'[^0-9]'), '');
+    return int.tryParse(digits) ?? -1;
+  }
+
   static String _columnName(int index) {
     var n = index + 1;
     final chars = <int>[];
@@ -1068,6 +1127,8 @@ class CompanyDialParser {
 
   static ParsedCompanyDial parse(Uint8List bytes) {
     final xlsx = XlsxSheetDoc.fromBytes(bytes, preferredSheetName: '평일');
+    final fixedReserveText = xlsx.readByRef('G35');
+    final fixedReserveId = _normalizeId(fixedReserveText);
 
     final departures = <String, int>{};
     final departureRows = <ParsedDepartureRow>[];
@@ -1113,6 +1174,7 @@ class CompanyDialParser {
       departures: departures,
       departureRows: departureRows,
       arrivals: arrivals,
+      okdongReserveFromG35: fixedReserveId.isEmpty ? null : fixedReserveId,
     );
   }
 
@@ -1196,7 +1258,9 @@ class TrainAutoMapper {
     }
 
     final okdongStayIds = latestByOkdongSlot.values.map((a) => a.trainId).toSet();
-    final reserveIds = explicitReserveIds.isNotEmpty ? explicitReserveIds : _inferReserveIds(trains, parsed);
+    final reserveIds = parsed.okdongReserveFromG35 != null
+        ? <String>{parsed.okdongReserveFromG35!}
+        : (explicitReserveIds.isNotEmpty ? explicitReserveIds : _inferReserveIds(trains, parsed));
 
     return trains.map((train) {
       final dep = parsed.departures[train.id] ?? train.departureMins;
