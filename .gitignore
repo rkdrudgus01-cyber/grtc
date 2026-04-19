@@ -54,3 +54,5 @@ app.*.map.json
 /*.jpeg
 /*.png
 /*.xlsx
+/*.bundle
+/*.bundle.lock
