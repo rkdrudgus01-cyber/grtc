@@ -1362,7 +1362,7 @@ class DoubleParkingEngine {
 
   static DoubleParkingResult simulate({
     required ParsedCompanyDial todayDial,
-    required List<TomorrowAssignment> tomorrowAssignments,
+    required ParsedCompanyDial tomorrowDial,
   }) {
     final inboundByLine = <String, List<DoubleParkingEntry>>{
       for (final line in monitoredLines) line: <DoubleParkingEntry>[],
@@ -1383,13 +1383,13 @@ class DoubleParkingEngine {
       );
     }
 
-    for (final assignment in tomorrowAssignments) {
-      final line = _lineFromText('${assignment.lane} ${assignment.note}');
+    for (final departure in tomorrowDial.departureRows) {
+      final line = _lineFromText('${departure.lane} ${departure.note}');
       if (line == null) continue;
       outboundByLine[line]!.add(
         DoubleParkingEntry(
-          trainId: assignment.trainId,
-          timeMins: assignment.departureMins,
+          trainId: departure.trainId,
+          timeMins: departure.departureMins,
         ),
       );
     }
@@ -1446,7 +1446,7 @@ class DoubleParkingEngine {
             .map((e) => '${e.key + 1}.${e.value.trainId}')
             .join(' -> ');
 
-    final okdongSummary = _buildOkdongSummary(todayDial, tomorrowAssignments);
+    final okdongSummary = _buildOkdongSummary(todayDial, tomorrowDial);
     globalWarnings.addAll(okdongSummary.warnings);
 
     return DoubleParkingResult(
@@ -1459,7 +1459,7 @@ class DoubleParkingEngine {
 
   static OkdongParkingSummary _buildOkdongSummary(
     ParsedCompanyDial todayDial,
-    List<TomorrowAssignment> tomorrowAssignments,
+    ParsedCompanyDial tomorrowDial,
   ) {
     final latestBySlot = <String, ParsedArrivalRow>{};
     String? explicitReserveId;
@@ -1494,7 +1494,8 @@ class DoubleParkingEngine {
       warnings.add('금일 옥동 예비차를 명시적으로 찾지 못했습니다.');
     }
 
-    final tomorrowOkdongOut = tomorrowAssignments.where((a) => a.lane.contains('옥동')).map((a) => a.trainId).toSet();
+    final tomorrowOkdongOut =
+        tomorrowDial.departureRows.where((a) => a.lane.contains('옥동')).map((a) => a.trainId).toSet();
     if (reserveId != null && reserveId.isNotEmpty && !tomorrowOkdongOut.contains(reserveId)) {
       warnings.add('금일 옥동 예비차($reserveId)가 명일 옥동 출고에 포함되지 않았습니다.');
     }
