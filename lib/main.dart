@@ -137,6 +137,7 @@ class TomorrowAssignment {
   final int departureMins;
   final String lane;
   final String note;
+  final String reason;
 
   const TomorrowAssignment({
     required this.slot,
@@ -144,7 +145,22 @@ class TomorrowAssignment {
     required this.departureMins,
     required this.lane,
     required this.note,
+    this.reason = '',
   });
+}
+
+class TomorrowDialGenerationResult {
+  final List<TomorrowAssignment> assignments;
+  final List<String> logs;
+  final List<int> unassignedSlots;
+
+  const TomorrowDialGenerationResult({
+    required this.assignments,
+    required this.logs,
+    required this.unassignedSlots,
+  });
+
+  int get length => assignments.length;
 }
 
 class GRTCApp extends StatelessWidget {
@@ -182,6 +198,8 @@ class _MainScreenState extends State<MainScreen> {
   Uint8List? uploadedTomorrowDialBytes;
   ParsedCompanyDial? parsedTomorrowDial;
   List<TomorrowAssignment> tomorrowAssignments = const [];
+  List<String> generationLogs = const [];
+  List<int> unassignedTomorrowSlots = const [];
   Set<String> okdongForbidden = {};
   ViewMode viewMode = ViewMode.dial;
   String message = '오늘 다이얼 미업로드';
@@ -235,6 +253,8 @@ class _MainScreenState extends State<MainScreen> {
                   t.id,
             };
             tomorrowAssignments = const [];
+            generationLogs = const [];
+            unassignedTomorrowSlots = const [];
             message =
                 '금일 업로드 완료 / 출고 ${parsed.departures.length}건 / 입고 ${parsed.arrivals.length}건 / 자동복원 완료';
           });
@@ -303,7 +323,10 @@ class _MainScreenState extends State<MainScreen> {
         return t.copyWith(statuses: next);
       }).toList();
       tomorrowAssignments = const [];
+      generationLogs = const [];
+      unassignedTomorrowSlots = const [];
     });
+
   }
 
   bool _blocksOkdong(TrainStatus status) {
@@ -320,6 +343,8 @@ class _MainScreenState extends State<MainScreen> {
         okdongForbidden.add(id);
       }
       tomorrowAssignments = const [];
+      generationLogs = const [];
+      unassignedTomorrowSlots = const [];
     });
   }
 
@@ -329,16 +354,25 @@ class _MainScreenState extends State<MainScreen> {
       return;
     }
 
-    final generated = TomorrowDialEngine.generate(
+    final generated = TomorrowDialEngine.generateDetailed(
       trains: trains,
       todayDial: parsedTodayDial!,
       okdongForbidden: okdongForbidden,
     );
 
+    final unassignedSuffix = generated.unassignedSlots.isEmpty
+        ? ''
+        : ' / 미배정 ${generated.unassignedSlots.join(', ')}';
     setState(() {
-      tomorrowAssignments = generated;
-      message = '명일 다이얼 생성 완료 / ${generated.length}개 슬롯 배정';
+      tomorrowAssignments = generated.assignments;
+      generationLogs = generated.logs;
+      unassignedTomorrowSlots = generated.unassignedSlots;
+      message = '명일 다이얼 생성 완료 / ${generated.length}개 슬롯 배정$unassignedSuffix';
     });
+
+    for (final log in generated.logs) {
+      debugPrint('[TomorrowDial] $log');
+    }
   }
 
   void _saveCompanyExcel() {
@@ -383,6 +417,8 @@ class _MainScreenState extends State<MainScreen> {
       uploadedTomorrowDialBytes = null;
       parsedTomorrowDial = null;
       tomorrowAssignments = const [];
+      generationLogs = const [];
+      unassignedTomorrowSlots = const [];
       okdongForbidden.clear();
       viewMode = ViewMode.dial;
       message = '전체 초기화 완료';
@@ -1562,6 +1598,198 @@ class TomorrowDialEngine {
     13: TrainStatus.oneLoop,
   };
 
+  static TomorrowDialGenerationResult generateDetailed({
+    required List<Train> trains,
+    required ParsedCompanyDial todayDial,
+    required Set<String> okdongForbidden,
+  }) {
+    final slots = todayDial.departureRows.take(18).toList()..sort((a, b) => a.slot.compareTo(b.slot));
+    final assignmentsBySlot = <int, TomorrowAssignment>{};
+    final usedTrainIds = <String>{};
+    final logs = <String>[];
+    final available = trains.where((t) => !_isExcluded(t)).toList();
+
+    Train? pickForSlot(
+      ParsedDepartureRow slot,
+      bool Function(Train) predicate, {
+      bool highMileage = false,
+    }) {
+      final isOkdongSlot = _isOkdongLane(slot.lane);
+      final pool = available.where((train) {
+        if (usedTrainIds.contains(train.id)) return false;
+        if (isOkdongSlot && okdongForbidden.contains(train.id)) return false;
+        return predicate(train);
+      }).toList()
+        ..sort((a, b) => _compareTrain(a, b, highMileage: highMileage));
+      return firstOrNull(pool);
+    }
+
+    bool assignSlot(
+      ParsedDepartureRow slot,
+      Train train, {
+      required String note,
+      required String reason,
+    }) {
+      if (assignmentsBySlot.containsKey(slot.slot)) {
+        logs.add('slot ${slot.slot}: skipped($reason), already assigned');
+        return false;
+      }
+      if (usedTrainIds.contains(train.id)) {
+        logs.add('slot ${slot.slot}: skipped($reason), train ${train.id} already used');
+        return false;
+      }
+
+      assignmentsBySlot[slot.slot] = TomorrowAssignment(
+        slot: slot.slot,
+        trainId: train.id,
+        departureMins: slot.departureMins,
+        lane: slot.lane,
+        note: note,
+        reason: reason,
+      );
+      usedTrainIds.add(train.id);
+      logs.add('slot ${slot.slot}: ${train.id} ($reason)');
+      return true;
+    }
+
+    // Level 1: absolute rules
+    final tomorrowReserveSlot = firstOrNull(slots.where((s) => s.slot == 18));
+    if (tomorrowReserveSlot != null) {
+      final reserve = pickForSlot(
+            tomorrowReserveSlot,
+            (t) => t.has(TrainStatus.tomorrowReserve),
+          ) ??
+          pickForSlot(
+            tomorrowReserveSlot,
+            (t) => t.has(TrainStatus.okdongStay) && !t.has(TrainStatus.okdongReserve),
+          );
+      if (reserve != null) {
+        assignSlot(
+          tomorrowReserveSlot,
+          reserve,
+          note: statusLabel(TrainStatus.tomorrowReserve),
+          reason: 'L1 tomorrow reserve fixed',
+        );
+      } else {
+        logs.add('slot 18: no candidate for L1 tomorrow reserve');
+      }
+    }
+
+    final okdongOutboundSlots = slots.where((s) => _isOkdongLane(s.lane) && s.slot != 18).toList()
+      ..sort((a, b) => a.slot.compareTo(b.slot));
+
+    final firstOkdongOutbound = firstOrNull(
+      okdongOutboundSlots.where((s) => !assignmentsBySlot.containsKey(s.slot)),
+    );
+    if (firstOkdongOutbound != null) {
+      final reserveOut = pickForSlot(firstOkdongOutbound, (t) => t.has(TrainStatus.okdongReserve));
+      if (reserveOut != null) {
+        assignSlot(
+          firstOkdongOutbound,
+          reserveOut,
+          note: statusLabel(TrainStatus.okdongReserve),
+          reason: 'L1 today reserve must outbound',
+        );
+      } else {
+        logs.add('slot ${firstOkdongOutbound.slot}: no candidate for L1 today reserve outbound');
+      }
+    }
+
+    // Level 2: okdong structure + forbidden filter
+    for (final slot in okdongOutboundSlots) {
+      if (assignmentsBySlot.containsKey(slot.slot)) continue;
+      final train =
+          pickForSlot(slot, (t) => t.has(TrainStatus.okdongStay)) ?? pickForSlot(slot, (t) => true);
+      if (train != null) {
+        final reason = train.has(TrainStatus.okdongStay)
+            ? 'L2 keep okdong structure'
+            : 'L2 keep okdong structure (fallback)';
+        assignSlot(
+          slot,
+          train,
+          note: statusLabel(TrainStatus.okdongStay),
+          reason: reason,
+        );
+      } else {
+        logs.add('slot ${slot.slot}: unassigned at L2 (no okdong candidate)');
+      }
+    }
+
+    // Level 3: fixed status slots
+    for (final slot in slots) {
+      if (assignmentsBySlot.containsKey(slot.slot)) continue;
+      final fixedStatus = fixedStatusSlots[slot.slot];
+      if (fixedStatus == null) continue;
+
+      final train = pickForSlot(
+        slot,
+        (t) => t.has(fixedStatus),
+        highMileage: fixedStatus == TrainStatus.oneLoop,
+      );
+      if (train != null) {
+        assignSlot(
+          slot,
+          train,
+          note: statusLabel(fixedStatus),
+          reason: 'L3 fixed slot ${statusLabel(fixedStatus)}',
+        );
+      } else {
+        logs.add('slot ${slot.slot}: no candidate for L3 fixed slot ${statusLabel(fixedStatus)}');
+      }
+    }
+
+    // Level 4: dial guidance
+    for (final slot in slots) {
+      if (assignmentsBySlot.containsKey(slot.slot)) continue;
+      final train = pickForSlot(slot, (t) => _matchesDialGuide(t, slot));
+      if (train != null) {
+        final fixedStatus = fixedStatusSlots[slot.slot];
+        final note = fixedStatus == null ? '' : '${statusLabel(fixedStatus)} 보강';
+        assignSlot(
+          slot,
+          train,
+          note: note,
+          reason: 'L4 dial guide',
+        );
+      }
+    }
+
+    // Level 5: deterministic mileage fallback
+    for (final slot in slots) {
+      if (assignmentsBySlot.containsKey(slot.slot)) continue;
+      final fixedStatus = fixedStatusSlots[slot.slot];
+      final train = pickForSlot(
+        slot,
+        (t) => true,
+        highMileage: fixedStatus == TrainStatus.oneLoop,
+      );
+      if (train != null) {
+        final note = fixedStatus == null ? '' : '${statusLabel(fixedStatus)} 대체';
+        assignSlot(
+          slot,
+          train,
+          note: note,
+          reason: 'L5 mileage fallback',
+        );
+      } else {
+        logs.add('slot ${slot.slot}: unassigned at L5 (no available train)');
+      }
+    }
+
+    final assignments = assignmentsBySlot.values.toList()..sort((a, b) => a.slot.compareTo(b.slot));
+    final unassignedSlots =
+        slots.where((s) => !assignmentsBySlot.containsKey(s.slot)).map((s) => s.slot).toList()..sort();
+    if (unassignedSlots.isNotEmpty) {
+      logs.add('unassigned slots: ${unassignedSlots.join(', ')}');
+    }
+
+    return TomorrowDialGenerationResult(
+      assignments: assignments,
+      logs: logs,
+      unassignedSlots: unassignedSlots,
+    );
+  }
+
   static List<TomorrowAssignment> generate({
     required List<Train> trains,
     required ParsedCompanyDial todayDial,
@@ -1636,6 +1864,16 @@ class TomorrowDialEngine {
   }
 
   static bool _isOkdongLane(String lane) => lane.contains('옥동');
+
+  static int _compareTrain(
+    Train a,
+    Train b, {
+    required bool highMileage,
+  }) {
+    final mileageCompare = highMileage ? b.mileage.compareTo(a.mileage) : a.mileage.compareTo(b.mileage);
+    if (mileageCompare != 0) return mileageCompare;
+    return a.id.compareTo(b.id);
+  }
 
   static bool _matchesDialGuide(Train train, ParsedDepartureRow slot) {
     if (train.has(TrainStatus.longDia)) return slot.note.contains('10') || slot.note.contains('6.5');
