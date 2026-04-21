@@ -68,6 +68,21 @@ T? firstOrNull<T>(Iterable<T> values) {
   return iterator.moveNext() ? iterator.current : null;
 }
 
+enum WarningSeverity {
+  blocking,
+  advisory,
+}
+
+class DialWarning {
+  final WarningSeverity severity;
+  final String message;
+
+  const DialWarning({
+    required this.severity,
+    required this.message,
+  });
+}
+
 class Train {
   final String id;
   final Set<TrainStatus> statuses;
@@ -187,7 +202,8 @@ class GRTCApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
         useMaterial3: true,
         chipTheme: const ChipThemeData(
-          labelStyle: TextStyle(fontSize: kChipFontSize, fontWeight: FontWeight.w700),
+          labelStyle:
+              TextStyle(fontSize: kChipFontSize, fontWeight: FontWeight.w700),
           padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         ),
       ),
@@ -301,7 +317,8 @@ class _MainScreenState extends State<MainScreen> {
           setState(() {
             uploadedTomorrowDialBytes = bytes;
             parsedTomorrowDial = parsed;
-            message = '명일 업로드 완료 / 출고 ${parsed.departures.length}건 / 입고 ${parsed.arrivals.length}건';
+            message =
+                '명일 업로드 완료 / 출고 ${parsed.departures.length}건 / 입고 ${parsed.arrivals.length}건';
           });
         } catch (e) {
           setState(() {
@@ -341,7 +358,6 @@ class _MainScreenState extends State<MainScreen> {
       generationLogs = const [];
       unassignedTomorrowSlots = const [];
     });
-
   }
 
   bool _blocksOkdong(TrainStatus status) {
@@ -364,25 +380,10 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   List<String> _blockingIssuesForGeneration() {
-    final issues = <String>[];
-    if (generationMode == GenerationMode.autoRestore && parsedTodayDial == null) {
-      issues.add('자동 복원 생성은 오늘 다이얼 업로드가 필요합니다.');
-    }
-
-    final okdongSet = <String>{
-      for (final t in trains)
-        if (t.has(TrainStatus.okdongStay) || t.has(TrainStatus.okdongReserve)) t.id,
-    };
-    if (okdongSet.length != 5) {
-      issues.add('옥동 주박군 5대 조건이 맞지 않습니다. 현재 ${okdongSet.length}대입니다.');
-    }
-
-    final reserveCount = trains.where((t) => t.has(TrainStatus.okdongReserve)).length;
-    if (reserveCount != 1) {
-      issues.add('금일 옥동 예비 차량은 1대여야 합니다. 현재 ${reserveCount}대입니다.');
-    }
-
-    return issues;
+    return _collectDialWarnings()
+        .where((w) => w.severity == WarningSeverity.blocking)
+        .map((w) => w.message)
+        .toList();
   }
 
   void _generateTomorrowDial() {
@@ -403,23 +404,11 @@ class _MainScreenState extends State<MainScreen> {
       todayDial: effectiveDial,
       okdongForbidden: okdongForbidden,
     );
-    /*
-
-    final modeText = parsedTodayDial == null ? '빠른 생성' : '자동 복원';
-    final unassignedSuffix =
-        generated.unassignedSlots.isEmpty ? '' : ' / 미배정 ${generated.unassignedSlots.join(', ')}';
+    final modeText =
+        generationMode == GenerationMode.quickManual ? '빠른 생성' : '자동 복원 생성';
+    final unassignedSuffix = generated.unassignedSlots.isEmpty
+        ? ''
         : ' / 미배정 ${generated.unassignedSlots.join(', ')}';
-    setState(() {
-      tomorrowAssignments = generated.assignments;
-      generationLogs = generated.logs;
-      unassignedTomorrowSlots = generated.unassignedSlots;
-      message = '명일 다이얼 생성 완료 / ${generated.length}개 슬롯 배정$unassignedSuffix';
-    });
-
-    */
-    final modeText = parsedTodayDial == null ? '빠른 생성' : '자동 복원 생성';
-    final unassignedSuffix =
-        generated.unassignedSlots.isEmpty ? '' : ' / 미배정 ${generated.unassignedSlots.join(', ')}';
     setState(() {
       tomorrowAssignments = generated.assignments;
       generationLogs = generated.logs;
@@ -463,10 +452,6 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _saveCompanyExcel() async {
-    if (DateTime.now().millisecondsSinceEpoch < 0) {
-      setState(() => message = '저장할 기준 엑셀이 없습니다. 오늘 다이얼을 먼저 업로드하세요.');
-      return;
-    }
     if (tomorrowAssignments.isEmpty) {
       _generateTomorrowDial();
     }
@@ -482,32 +467,37 @@ class _MainScreenState extends State<MainScreen> {
     }
 
     try {
-      final parkingResult = parsedTodayDial == null || parsedTomorrowDial == null
-          ? null
-          : DoubleParkingEngine.simulate(
-              todayDial: parsedTodayDial!,
-              tomorrowDial: parsedTomorrowDial!,
-            );
+      final parkingResult =
+          parsedTodayDial == null || parsedTomorrowDial == null
+              ? null
+              : DoubleParkingEngine.simulate(
+                  todayDial: parsedTodayDial!,
+                  tomorrowDial: parsedTomorrowDial!,
+                );
       final bytes = CompanyExcelWriter.write(
         templateBytes: templateBytes,
         assignments: tomorrowAssignments,
         doubleParkingResult: parkingResult,
       );
-      final blob = html.Blob([bytes], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      final blob = html.Blob([bytes],
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       final url = html.Url.createObjectUrlFromBlob(blob);
       html.AnchorElement(href: url)
         ..download = '명일입출고계획.xlsx'
         ..click();
       html.Url.revokeObjectUrl(url);
 
-      setState(() => message = parkingResult == null ? '회사 엑셀 양식 저장 완료' : '회사 엑셀 양식 저장 완료 / 이중주차 결과 포함');
+      setState(() => message = parkingResult == null
+          ? '회사 엑셀 양식 저장 완료'
+          : '회사 엑셀 양식 저장 완료 / 이중주차 결과 포함');
     } catch (e) {
       setState(() => message = '엑셀 저장 오류: $e');
     }
   }
 
   Future<Uint8List> _loadBundledTemplateBytes() async {
-    final data = await rootBundle.load('assets/templates/company_blank_template.xlsx');
+    final data =
+        await rootBundle.load('assets/templates/company_blank_template.xlsx');
     return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
   }
 
@@ -592,7 +582,8 @@ class _MainScreenState extends State<MainScreen> {
             child: SegmentedButton<ViewMode>(
               segments: const [
                 ButtonSegment(value: ViewMode.dial, label: Text('다이얼 관리')),
-                ButtonSegment(value: ViewMode.doubleParking, label: Text('이중주차 시뮬레이터')),
+                ButtonSegment(
+                    value: ViewMode.doubleParking, label: Text('이중주차 시뮬레이터')),
               ],
               selected: {viewMode},
               onSelectionChanged: (selected) {
@@ -682,7 +673,8 @@ class _MainScreenState extends State<MainScreen> {
                 children: [
                   Text(
                     entry.key,
-                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                    style: const TextStyle(
+                        fontSize: 20, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 10),
                   Wrap(
@@ -717,7 +709,10 @@ class _MainScreenState extends State<MainScreen> {
               backgroundColor: forbidden ? Colors.red : Colors.blue,
               child: Text(
                 train.id,
-                style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold),
               ),
             ),
             title: Text(
@@ -742,12 +737,17 @@ class _MainScreenState extends State<MainScreen> {
               child: forbidden
                   ? FilledButton(
                       onPressed: () => _toggleOkdongForbidden(train.id),
-                      style: FilledButton.styleFrom(backgroundColor: Colors.red),
-                      child: const Text('옥동금지', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      style:
+                          FilledButton.styleFrom(backgroundColor: Colors.red),
+                      child: const Text('옥동금지',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold)),
                     )
                   : OutlinedButton(
                       onPressed: () => _toggleOkdongForbidden(train.id),
-                      child: const Text('옥동허용', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      child: const Text('옥동허용',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold)),
                     ),
             ),
             children: [
@@ -773,7 +773,8 @@ class _MainScreenState extends State<MainScreen> {
                     alignment: Alignment.centerLeft,
                     child: Text(
                       _tomorrowSummary(train.id),
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                      style: const TextStyle(
+                          fontSize: 18, fontWeight: FontWeight.w700),
                     ),
                   ),
                 ),
@@ -785,9 +786,12 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   String _tomorrowSummary(String trainId) {
-    final assigned = tomorrowAssignments.where((a) => a.trainId == trainId).toList();
+    final assigned =
+        tomorrowAssignments.where((a) => a.trainId == trainId).toList();
     return assigned
-        .map((a) => '명일 ${a.slot}번 ${a.lane} ${TimeParser.format(a.departureMins)} ${a.note}'.trim())
+        .map((a) =>
+            '명일 ${a.slot}번 ${a.lane} ${TimeParser.format(a.departureMins)} ${a.note}'
+                .trim())
         .join(' / ');
   }
 
@@ -853,12 +857,16 @@ class _MainScreenState extends State<MainScreen> {
                     backgroundColor: forbidden ? Colors.red : Colors.blue,
                     child: Text(
                       train.id,
-                      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold),
                     ),
                   ),
                   title: Text(
                     '${train.id} / 출고 ${TimeParser.format(train.departureMins)}',
-                    style: const TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
+                    style: const TextStyle(
+                        fontSize: 21, fontWeight: FontWeight.bold),
                   ),
                   subtitle: Padding(
                     padding: const EdgeInsets.only(top: 8),
@@ -893,12 +901,17 @@ class _MainScreenState extends State<MainScreen> {
                     child: forbidden
                         ? FilledButton(
                             onPressed: () => _toggleOkdongForbidden(train.id),
-                            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-                            child: const Text('옥동금지', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                            style: FilledButton.styleFrom(
+                                backgroundColor: Colors.red),
+                            child: const Text('옥동금지',
+                                style: TextStyle(
+                                    fontSize: 16, fontWeight: FontWeight.bold)),
                           )
                         : OutlinedButton(
                             onPressed: () => _toggleOkdongForbidden(train.id),
-                            child: const Text('옥동허용', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                            child: const Text('옥동허용',
+                                style: TextStyle(
+                                    fontSize: 16, fontWeight: FontWeight.bold)),
                           ),
                   ),
                   children: [
@@ -924,7 +937,8 @@ class _MainScreenState extends State<MainScreen> {
                           alignment: Alignment.centerLeft,
                           child: Text(
                             _tomorrowSummaryWithReason(train.id),
-                            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                            style: const TextStyle(
+                                fontSize: 18, fontWeight: FontWeight.w700),
                           ),
                         ),
                       ),
@@ -948,10 +962,12 @@ class _MainScreenState extends State<MainScreen> {
         case TrainListFilter.needsReview:
           return _trainNeedsReview(train);
         case TrainListFilter.okdongOnly:
-          return train.has(TrainStatus.okdongStay) || train.has(TrainStatus.okdongReserve);
+          return train.has(TrainStatus.okdongStay) ||
+              train.has(TrainStatus.okdongReserve);
       }
     }).toList();
-    filtered.sort((a, b) => (int.tryParse(a.id) ?? 9999).compareTo(int.tryParse(b.id) ?? 9999));
+    filtered.sort((a, b) =>
+        (int.tryParse(a.id) ?? 9999).compareTo(int.tryParse(b.id) ?? 9999));
     return filtered;
   }
 
@@ -983,8 +999,9 @@ class _MainScreenState extends State<MainScreen> {
       reasons.add('7D 복수 지정');
     }
 
-    final hasOkdongStatus =
-        train.has(TrainStatus.okdongStay) || train.has(TrainStatus.okdongReserve) || train.has(TrainStatus.tomorrowReserve);
+    final hasOkdongStatus = train.has(TrainStatus.okdongStay) ||
+        train.has(TrainStatus.okdongReserve) ||
+        train.has(TrainStatus.tomorrowReserve);
     if (okdongForbidden.contains(train.id) && hasOkdongStatus) {
       reasons.add('옥동금지와 옥동상태 충돌');
     }
@@ -993,16 +1010,19 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   String _tomorrowSummaryWithReason(String trainId) {
-    final assigned = tomorrowAssignments.where((a) => a.trainId == trainId).toList();
+    final assigned =
+        tomorrowAssignments.where((a) => a.trainId == trainId).toList();
     return assigned.map((a) {
       final reason = a.reason.isEmpty ? '' : ' [${a.reason}]';
-      return '명일 ${a.slot}번 ${a.lane} ${TimeParser.format(a.departureMins)} ${a.note}$reason'.trim();
+      return '명일 ${a.slot}번 ${a.lane} ${TimeParser.format(a.departureMins)} ${a.note}$reason'
+          .trim();
     }).join(' / ');
   }
 
   Widget _buildNeedsReviewPanel() {
     final targets = trains.where(_trainNeedsReview).toList()
-      ..sort((a, b) => (int.tryParse(a.id) ?? 9999).compareTo(int.tryParse(b.id) ?? 9999));
+      ..sort((a, b) =>
+          (int.tryParse(a.id) ?? 9999).compareTo(int.tryParse(b.id) ?? 9999));
     if (targets.isEmpty) return const SizedBox.shrink();
 
     return Container(
@@ -1030,52 +1050,105 @@ class _MainScreenState extends State<MainScreen> {
   Widget _buildWarningPanel() {
     final warnings = _collectDialWarnings();
     if (warnings.isEmpty) return const SizedBox.shrink();
+    final blocking =
+        warnings.where((w) => w.severity == WarningSeverity.blocking).toList();
+    final advisory =
+        warnings.where((w) => w.severity == WarningSeverity.advisory).toList();
 
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-      child: Card(
-        color: Colors.red.shade50,
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Text(
-            warnings.map((w) => '경고: $w').join('\n'),
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-          ),
-        ),
+      child: Column(
+        children: [
+          if (blocking.isNotEmpty)
+            Card(
+              color: Colors.red.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(
+                  blocking.map((w) => '중단 경고: ${w.message}').join('\n'),
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
+          if (blocking.isNotEmpty && advisory.isNotEmpty)
+            const SizedBox(height: 6),
+          if (advisory.isNotEmpty)
+            Card(
+              color: Colors.amber.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(
+                  advisory.map((w) => '점검 권장: ${w.message}').join('\n'),
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
 
-  List<String> _collectDialWarnings() {
-    final warnings = <String>[];
-    if (generationMode == GenerationMode.autoRestore && parsedTodayDial == null) {
-      warnings.add('자동 복원 생성은 오늘 다이얼 업로드가 필요합니다.');
+  List<DialWarning> _collectDialWarnings() {
+    final warnings = <DialWarning>[];
+    if (generationMode == GenerationMode.autoRestore &&
+        parsedTodayDial == null) {
+      warnings.add(
+        const DialWarning(
+          severity: WarningSeverity.blocking,
+          message: '자동 복원 생성은 오늘 다이얼 업로드가 필요합니다.',
+        ),
+      );
     }
 
     final okdongSet = <String>{
       for (final t in trains)
-        if (t.has(TrainStatus.okdongStay) || t.has(TrainStatus.okdongReserve)) t.id,
+        if (t.has(TrainStatus.okdongStay) || t.has(TrainStatus.okdongReserve))
+          t.id,
     };
-    final reserveCount = trains.where((t) => t.has(TrainStatus.okdongReserve)).length;
+    final reserveCount =
+        trains.where((t) => t.has(TrainStatus.okdongReserve)).length;
     if (okdongSet.length != 5) {
-      warnings.add('옥동 주박군이 5대가 아닙니다. 현재 ${okdongSet.length}대입니다.');
+      warnings.add(
+        DialWarning(
+          severity: WarningSeverity.blocking,
+          message: '옥동 주박군이 5대가 아닙니다. 현재 ${okdongSet.length}대입니다.',
+        ),
+      );
     }
     if (reserveCount != 1) {
-      warnings.add('금일 옥동 예비 차량 수가 1대가 아닙니다. 현재 ${reserveCount}대입니다.');
+      warnings.add(
+        DialWarning(
+          severity: WarningSeverity.blocking,
+          message: '금일 옥동 예비 차량 수가 1대가 아닙니다. 현재 ${reserveCount}대입니다.',
+        ),
+      );
     }
     if (tomorrowAssignments.isNotEmpty && unassignedTomorrowSlots.isNotEmpty) {
-      warnings.add('미배정 슬롯: ${unassignedTomorrowSlots.join(', ')}');
+      warnings.add(
+        DialWarning(
+          severity: WarningSeverity.advisory,
+          message: '미배정 슬롯: ${unassignedTomorrowSlots.join(', ')}',
+        ),
+      );
     }
     final reviewCount = trains.where(_trainNeedsReview).length;
     if (reviewCount > 0) {
-      warnings.add('확인 필요 차량: ${reviewCount}대');
+      warnings.add(
+        DialWarning(
+          severity: WarningSeverity.advisory,
+          message: '확인 필요 차량: ${reviewCount}대',
+        ),
+      );
     }
     return warnings;
   }
 
   Widget _buildAssignmentPanel() {
-    final sorted = [...tomorrowAssignments]..sort((a, b) => a.slot.compareTo(b.slot));
+    final sorted = [...tomorrowAssignments]
+      ..sort((a, b) => a.slot.compareTo(b.slot));
     return Container(
       color: Colors.grey.shade100,
       child: Column(
@@ -1092,7 +1165,8 @@ class _MainScreenState extends State<MainScreen> {
                 ),
                 Text(
                   '${sorted.length}개',
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700),
                 ),
               ],
             ),
@@ -1102,7 +1176,8 @@ class _MainScreenState extends State<MainScreen> {
                 ? const Center(
                     child: Text(
                       '아직 생성된 배정이 없습니다.',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                     ),
                   )
                 : ListView.builder(
@@ -1115,7 +1190,8 @@ class _MainScreenState extends State<MainScreen> {
                         child: ListTile(
                           title: Text(
                             '${a.slot}번 / ${a.trainId} / ${TimeParser.format(a.departureMins)}',
-                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                            style: const TextStyle(
+                                fontSize: 17, fontWeight: FontWeight.w700),
                           ),
                           subtitle: Text(
                             '${a.lane} ${a.note}'.trim(),
@@ -1126,7 +1202,9 @@ class _MainScreenState extends State<MainScreen> {
                               : Chip(
                                   label: Text(
                                     a.reason,
-                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                                    style: const TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700),
                                   ),
                                 ),
                         ),
@@ -1183,7 +1261,8 @@ class _MainScreenState extends State<MainScreen> {
               padding: const EdgeInsets.all(12),
               child: Text(
                 result.warnings.map((w) => '경고: $w').join('\n'),
-                style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                style:
+                    const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
               ),
             ),
           ),
@@ -1245,7 +1324,10 @@ class _MainScreenState extends State<MainScreen> {
             if (line.warnings.isNotEmpty)
               Text(
                 line.warnings.map((w) => '경고: $w').join('\n'),
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.red),
+                style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.red),
               ),
           ],
         ),
@@ -1254,7 +1336,8 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   String _okdongSummaryText(OkdongParkingSummary summary) {
-    final normal = summary.normalIds.isEmpty ? '없음' : summary.normalIds.join(', ');
+    final normal =
+        summary.normalIds.isEmpty ? '없음' : summary.normalIds.join(', ');
     final reserve = summary.reserveId ?? '미확인';
     final all = summary.allIds.isEmpty ? '없음' : summary.allIds.join(', ');
     return '옥동 주박(일반4): $normal\n옥동 예비(1): $reserve\n총 5대 기준 확인: $all';
@@ -1328,10 +1411,12 @@ class XlsxSheetDoc {
     required this.sharedStrings,
   });
 
-  static XlsxSheetDoc fromBytes(Uint8List bytes, {String preferredSheetName = '평일'}) {
+  static XlsxSheetDoc fromBytes(Uint8List bytes,
+      {String preferredSheetName = '평일'}) {
     final archive = ZipDecoder().decodeBytes(bytes, verify: false);
     final sheetPath = _resolveSheetPath(archive, preferredSheetName);
-    final sheetXml = XmlDocument.parse(utf8.decode(_fileBytes(archive, sheetPath), allowMalformed: true));
+    final sheetXml = XmlDocument.parse(
+        utf8.decode(_fileBytes(archive, sheetPath), allowMalformed: true));
     final sharedStrings = _parseSharedStrings(archive);
 
     return XlsxSheetDoc(
@@ -1342,14 +1427,16 @@ class XlsxSheetDoc {
     );
   }
 
-  Iterable<XmlElement> get rows =>
-      sheetDocument.descendants.whereType<XmlElement>().where((e) => e.name.local == 'row');
+  Iterable<XmlElement> get rows => sheetDocument.descendants
+      .whereType<XmlElement>()
+      .where((e) => e.name.local == 'row');
 
   int rowNumber(XmlElement row) {
     final direct = int.tryParse(row.getAttribute('r') ?? '');
     if (direct != null) return direct;
 
-    final firstCell = firstOrNull(row.children.whereType<XmlElement>().where((e) => e.name.local == 'c'));
+    final firstCell = firstOrNull(
+        row.children.whereType<XmlElement>().where((e) => e.name.local == 'c'));
     if (firstCell == null) return -1;
     final ref = firstCell.getAttribute('r') ?? '';
     final digits = ref.replaceAll(RegExp(r'[^0-9]'), '');
@@ -1370,14 +1457,16 @@ class XlsxSheetDoc {
     return readCellValue(row, colIndex);
   }
 
-  void writeCell(XmlElement row, int columnIndex, Object? value, {required bool asText}) {
+  void writeCell(XmlElement row, int columnIndex, Object? value,
+      {required bool asText}) {
     final rowNum = rowNumber(row);
     if (rowNum < 1) return;
     final cell = _ensureCell(row, columnIndex, rowNum);
     _writeCellValue(cell, value, asText: asText);
   }
 
-  void writeAt(int rowNumber1Based, int columnIndex, Object? value, {required bool asText}) {
+  void writeAt(int rowNumber1Based, int columnIndex, Object? value,
+      {required bool asText}) {
     if (rowNumber1Based < 1) return;
     final row = _ensureRow(rowNumber1Based);
     final cell = _ensureCell(row, columnIndex, rowNumber1Based);
@@ -1386,7 +1475,8 @@ class XlsxSheetDoc {
 
   Uint8List encode() {
     final updatedSheet = sheetDocument.toXmlString(pretty: false);
-    final index = archive.files.indexWhere((f) => _normalizePath(f.name) == _normalizePath(sheetPath));
+    final index = archive.files
+        .indexWhere((f) => _normalizePath(f.name) == _normalizePath(sheetPath));
     if (index < 0) {
       throw Exception('시트 파일을 저장할 수 없습니다: $sheetPath');
     }
@@ -1400,14 +1490,18 @@ class XlsxSheetDoc {
 
   static String _resolveSheetPath(Archive archive, String preferredSheetName) {
     final workbookPath = 'xl/workbook.xml';
-    final workbook = XmlDocument.parse(utf8.decode(_fileBytes(archive, workbookPath), allowMalformed: true));
-    final sheetElements =
-        workbook.descendants.whereType<XmlElement>().where((e) => e.name.local == 'sheet').toList();
+    final workbook = XmlDocument.parse(
+        utf8.decode(_fileBytes(archive, workbookPath), allowMalformed: true));
+    final sheetElements = workbook.descendants
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'sheet')
+        .toList();
     if (sheetElements.isEmpty) {
       throw Exception('workbook.xml에서 시트를 찾지 못했습니다.');
     }
 
-    final selected = firstOrNull(sheetElements.where((s) => s.getAttribute('name') == preferredSheetName)) ??
+    final selected = firstOrNull(sheetElements
+            .where((s) => s.getAttribute('name') == preferredSheetName)) ??
         sheetElements.first;
     final relId = _attributeByLocalName(selected, 'id');
     if (relId.isEmpty) {
@@ -1415,10 +1509,12 @@ class XlsxSheetDoc {
     }
 
     final relsPath = 'xl/_rels/workbook.xml.rels';
-    final relsDoc = XmlDocument.parse(utf8.decode(_fileBytes(archive, relsPath), allowMalformed: true));
+    final relsDoc = XmlDocument.parse(
+        utf8.decode(_fileBytes(archive, relsPath), allowMalformed: true));
     final rel = firstOrNull(
       relsDoc.descendants.whereType<XmlElement>().where(
-            (e) => e.name.local == 'Relationship' && e.getAttribute('Id') == relId,
+            (e) =>
+                e.name.local == 'Relationship' && e.getAttribute('Id') == relId,
           ),
     );
 
@@ -1428,7 +1524,8 @@ class XlsxSheetDoc {
     }
 
     final normalizedTarget = _normalizeSheetTarget(target);
-    final exists = archive.files.any((f) => _normalizePath(f.name) == _normalizePath(normalizedTarget));
+    final exists = archive.files
+        .any((f) => _normalizePath(f.name) == _normalizePath(normalizedTarget));
     if (exists) return normalizedTarget;
     return _firstWorksheetPath(archive);
   }
@@ -1436,7 +1533,8 @@ class XlsxSheetDoc {
   static String _firstWorksheetPath(Archive archive) {
     final worksheets = archive.files
         .map((f) => _normalizePath(f.name))
-        .where((name) => name.startsWith('xl/worksheets/') && name.endsWith('.xml'))
+        .where((name) =>
+            name.startsWith('xl/worksheets/') && name.endsWith('.xml'))
         .toList()
       ..sort();
     if (worksheets.isEmpty) {
@@ -1461,19 +1559,23 @@ class XlsxSheetDoc {
 
   static List<String> _parseSharedStrings(Archive archive) {
     const sharedPath = 'xl/sharedStrings.xml';
-    final exists = archive.files.any((f) => _normalizePath(f.name) == sharedPath);
+    final exists =
+        archive.files.any((f) => _normalizePath(f.name) == sharedPath);
     if (!exists) return const [];
 
-    final doc = XmlDocument.parse(utf8.decode(_fileBytes(archive, sharedPath), allowMalformed: true));
-    final siElements = doc.descendants.whereType<XmlElement>().where((e) => e.name.local == 'si');
+    final doc = XmlDocument.parse(
+        utf8.decode(_fileBytes(archive, sharedPath), allowMalformed: true));
+    final siElements = doc.descendants
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'si');
     return siElements.map(_inlineTextFromSi).toList();
   }
 
   static String _inlineTextFromSi(XmlElement si) {
-    final directT = firstOrNull(si.children.whereType<XmlElement>().where((e) => e.name.local == 't'));
+    final directT = firstOrNull(
+        si.children.whereType<XmlElement>().where((e) => e.name.local == 't'));
     if (directT != null) return directT.innerText;
-    return si
-        .descendants
+    return si.descendants
         .whereType<XmlElement>()
         .where((e) => e.name.local == 't')
         .map((e) => e.innerText)
@@ -1481,12 +1583,16 @@ class XlsxSheetDoc {
   }
 
   static String _attributeByLocalName(XmlElement element, String localName) {
-    return firstOrNull(element.attributes.where((a) => a.name.local == localName))?.value ?? '';
+    return firstOrNull(
+                element.attributes.where((a) => a.name.local == localName))
+            ?.value ??
+        '';
   }
 
   static Uint8List _fileBytes(Archive archive, String path) {
     final normalizedPath = _normalizePath(path);
-    final file = firstOrNull(archive.files.where((f) => _normalizePath(f.name) == normalizedPath));
+    final file = firstOrNull(
+        archive.files.where((f) => _normalizePath(f.name) == normalizedPath));
     if (file == null) {
       throw Exception('엑셀 내부 파일을 찾을 수 없습니다: $path');
     }
@@ -1500,7 +1606,8 @@ class XlsxSheetDoc {
   static String _normalizePath(String path) => path.replaceAll('\\', '/');
 
   XmlElement _ensureRow(int rowNumber1Based) {
-    final existing = firstOrNull(rows.where((r) => rowNumber(r) == rowNumber1Based));
+    final existing =
+        firstOrNull(rows.where((r) => rowNumber(r) == rowNumber1Based));
     if (existing != null) return existing;
 
     final row = XmlElement(
@@ -1514,7 +1621,9 @@ class XlsxSheetDoc {
 
   XmlElement get _sheetDataElement {
     final element = firstOrNull(
-      sheetDocument.descendants.whereType<XmlElement>().where((e) => e.name.local == 'sheetData'),
+      sheetDocument.descendants
+          .whereType<XmlElement>()
+          .where((e) => e.name.local == 'sheetData'),
     );
     if (element == null) {
       throw Exception('sheetData 엘리먼트를 찾지 못했습니다.');
@@ -1523,7 +1632,9 @@ class XlsxSheetDoc {
   }
 
   static XmlElement? _findCellByColumn(XmlElement row, int columnIndex) {
-    for (final cell in row.children.whereType<XmlElement>().where((e) => e.name.local == 'c')) {
+    for (final cell in row.children
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'c')) {
       final ref = cell.getAttribute('r') ?? '';
       final col = _columnIndexFromRef(ref);
       if (col == columnIndex) return cell;
@@ -1536,7 +1647,8 @@ class XlsxSheetDoc {
     if (existing != null) return existing;
 
     final ref = '${_columnName(columnIndex)}$rowIndex';
-    final newCell = XmlElement(XmlName('c'), [XmlAttribute(XmlName('r'), ref)], []);
+    final newCell =
+        XmlElement(XmlName('c'), [XmlAttribute(XmlName('r'), ref)], []);
     row.children.add(newCell);
     return newCell;
   }
@@ -1549,13 +1661,16 @@ class XlsxSheetDoc {
       return _inlineTextFromCell(cell);
     }
 
-    final vElement = firstOrNull(cell.children.whereType<XmlElement>().where((e) => e.name.local == 'v'));
+    final vElement = firstOrNull(cell.children
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'v'));
     final raw = vElement?.innerText.trim() ?? '';
     if (raw.isEmpty) return null;
 
     if (type == 's') {
       final index = int.tryParse(raw);
-      if (index == null || index < 0 || index >= sharedStrings.length) return '';
+      if (index == null || index < 0 || index >= sharedStrings.length)
+        return '';
       return sharedStrings[index];
     }
     if (type == 'b') return raw == '1';
@@ -1566,10 +1681,11 @@ class XlsxSheetDoc {
   }
 
   static String _inlineTextFromCell(XmlElement cell) {
-    final isElement = firstOrNull(cell.children.whereType<XmlElement>().where((e) => e.name.local == 'is'));
+    final isElement = firstOrNull(cell.children
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'is'));
     if (isElement == null) return '';
-    final texts = isElement
-        .descendants
+    final texts = isElement.descendants
         .whereType<XmlElement>()
         .where((e) => e.name.local == 't')
         .map((e) => e.innerText)
@@ -1577,7 +1693,8 @@ class XlsxSheetDoc {
     return texts.join();
   }
 
-  static void _writeCellValue(XmlElement cell, Object? value, {required bool asText}) {
+  static void _writeCellValue(XmlElement cell, Object? value,
+      {required bool asText}) {
     final clean = value?.toString() ?? '';
     cell.children.clear();
 
@@ -1593,7 +1710,9 @@ class XlsxSheetDoc {
         XmlElement(
           XmlName('is'),
           const [],
-          [XmlElement(XmlName('t'), const [], [XmlText(clean)])],
+          [
+            XmlElement(XmlName('t'), const [], [XmlText(clean)])
+          ],
         ),
       );
       return;
@@ -1609,7 +1728,9 @@ class XlsxSheetDoc {
     if (parsed == null) return text;
     if (parsed is int) return parsed.toString();
     final formatted = parsed.toStringAsFixed(15);
-    return formatted.replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '');
+    return formatted
+        .replaceFirst(RegExp(r'0+$'), '')
+        .replaceFirst(RegExp(r'\.$'), '');
   }
 
   static int _columnIndexFromRef(String cellRef) {
@@ -1667,11 +1788,13 @@ class CompanyDialParser {
       try {
         final outId = _normalizeId(xlsx.readCellValue(row, outTrainCol));
         if (outId.isNotEmpty) {
-          final departureMins = TimeParser.parse(xlsx.readCellValue(row, outTimeCol));
+          final departureMins =
+              TimeParser.parse(xlsx.readCellValue(row, outTimeCol));
           departures[outId] = departureMins;
           departureRows.add(
             ParsedDepartureRow(
-              slot: _parseSlot(xlsx.readCellValue(row, outSlotCol), departureRows.length + 1),
+              slot: _parseSlot(xlsx.readCellValue(row, outSlotCol),
+                  departureRows.length + 1),
               trainId: outId,
               departureMins: departureMins,
               lane: _stringify(xlsx.readCellValue(row, outLaneCol)),
@@ -1765,7 +1888,8 @@ class TrainAutoMapper {
     TrainStatus.okdongReserve,
   };
 
-  static List<Train> applyTodayInfoBulk(List<Train> trains, ParsedCompanyDial parsed) {
+  static List<Train> applyTodayInfoBulk(
+      List<Train> trains, ParsedCompanyDial parsed) {
     final latestByOkdongSlot = <String, ParsedArrivalRow>{};
     final explicitReserveIds = <String>{};
 
@@ -1784,10 +1908,13 @@ class TrainAutoMapper {
       }
     }
 
-    final okdongStayIds = latestByOkdongSlot.values.map((a) => a.trainId).toSet();
+    final okdongStayIds =
+        latestByOkdongSlot.values.map((a) => a.trainId).toSet();
     final reserveIds = parsed.okdongReserveFromG35 != null
         ? <String>{parsed.okdongReserveFromG35!}
-        : (explicitReserveIds.isNotEmpty ? explicitReserveIds : _inferReserveIds(trains, parsed));
+        : (explicitReserveIds.isNotEmpty
+            ? explicitReserveIds
+            : _inferReserveIds(trains, parsed));
 
     return trains.map((train) {
       final dep = parsed.departures[train.id] ?? train.departureMins;
@@ -1805,9 +1932,13 @@ class TrainAutoMapper {
     }).toList();
   }
 
-  static Set<String> _inferReserveIds(List<Train> trains, ParsedCompanyDial parsed) {
+  static Set<String> _inferReserveIds(
+      List<Train> trains, ParsedCompanyDial parsed) {
     final allIds = trains.map((t) => t.id).toSet();
-    final movedIds = <String>{...parsed.departures.keys, ...parsed.arrivals.map((a) => a.trainId)};
+    final movedIds = <String>{
+      ...parsed.departures.keys,
+      ...parsed.arrivals.map((a) => a.trainId)
+    };
     final idleIds = allIds.difference(movedIds).toList()..sort();
     if (idleIds.length == 1) {
       return {idleIds.first};
@@ -1885,7 +2016,15 @@ class DoubleParkingResult {
 }
 
 class DoubleParkingEngine {
-  static const List<String> monitoredLines = ['M1', 'M2', 'D3', 'D2', 'D1', 'C2', 'C1'];
+  static const List<String> monitoredLines = [
+    'M1',
+    'M2',
+    'D3',
+    'D2',
+    'D1',
+    'C2',
+    'C1'
+  ];
 
   static DoubleParkingResult simulate({
     required ParsedCompanyDial todayDial,
@@ -1937,7 +2076,9 @@ class DoubleParkingEngine {
       if (inbound.isNotEmpty && outbound.isNotEmpty) {
         final firstOut = outbound.first.timeMins;
         final lastIn = inbound.last.timeMins;
-        if (_isKnownTime(firstOut) && _isKnownTime(lastIn) && firstOut < lastIn) {
+        if (_isKnownTime(firstOut) &&
+            _isKnownTime(lastIn) &&
+            firstOut < lastIn) {
           warnings.add('해당 선로에서 명일 첫 출고가 금일 마지막 입고보다 빠릅니다.');
         }
       }
@@ -1997,7 +2138,8 @@ class DoubleParkingEngine {
       final slot = _extractOkdongSlot(combined);
       if (slot != null) {
         final prev = latestBySlot[slot];
-        if (prev == null || _timeSort(arrival.arrivalMins, prev.arrivalMins) > 0) {
+        if (prev == null ||
+            _timeSort(arrival.arrivalMins, prev.arrivalMins) > 0) {
           latestBySlot[slot] = arrival;
         }
       }
@@ -2006,8 +2148,18 @@ class DoubleParkingEngine {
       }
     }
 
-    final normalIds = latestBySlot.values.map((e) => e.trainId).toSet().toList()..sort();
-    final reserveId = explicitReserveId;
+    final normalIds = latestBySlot.values.map((e) => e.trainId).toSet().toList()
+      ..sort();
+    final fixedReserveId = todayDial.okdongReserveFromG35;
+    final reserveId = fixedReserveId ?? explicitReserveId;
+    if (fixedReserveId != null &&
+        fixedReserveId.isNotEmpty &&
+        explicitReserveId != null &&
+        explicitReserveId.isNotEmpty &&
+        fixedReserveId != explicitReserveId) {
+      warnings.add(
+          '금일 옥동 예비차가 G35($fixedReserveId)와 입고 메모($explicitReserveId)에서 다릅니다. G35를 우선 적용합니다.');
+    }
     final allSet = {...normalIds};
     if (reserveId != null && reserveId.isNotEmpty) {
       allSet.add(reserveId);
@@ -2021,9 +2173,13 @@ class DoubleParkingEngine {
       warnings.add('금일 옥동 예비차를 명시적으로 찾지 못했습니다.');
     }
 
-    final tomorrowOkdongOut =
-        tomorrowDial.departureRows.where((a) => a.lane.contains('옥동')).map((a) => a.trainId).toSet();
-    if (reserveId != null && reserveId.isNotEmpty && !tomorrowOkdongOut.contains(reserveId)) {
+    final tomorrowOkdongOut = tomorrowDial.departureRows
+        .where((a) => a.lane.contains('옥동'))
+        .map((a) => a.trainId)
+        .toSet();
+    if (reserveId != null &&
+        reserveId.isNotEmpty &&
+        !tomorrowOkdongOut.contains(reserveId)) {
       warnings.add('금일 옥동 예비차($reserveId)가 명일 옥동 출고에 포함되지 않았습니다.');
     }
 
@@ -2045,7 +2201,8 @@ class DoubleParkingEngine {
       for (final item in entry.value) {
         final prev = lineByTrain[item.trainId];
         if (prev != null && prev != entry.key) {
-          warnings.add('$kind 중복: ${item.trainId}가 $prev, ${entry.key}에 동시에 배치되었습니다.');
+          warnings.add(
+              '$kind 중복: ${item.trainId}가 $prev, ${entry.key}에 동시에 배치되었습니다.');
         } else {
           lineByTrain[item.trainId] = entry.key;
         }
@@ -2094,7 +2251,8 @@ class TomorrowDialEngine {
     required ParsedCompanyDial todayDial,
     required Set<String> okdongForbidden,
   }) {
-    final slots = todayDial.departureRows.take(18).toList()..sort((a, b) => a.slot.compareTo(b.slot));
+    final slots = todayDial.departureRows.take(18).toList()
+      ..sort((a, b) => a.slot.compareTo(b.slot));
     final assignmentsBySlot = <int, TomorrowAssignment>{};
     final usedTrainIds = <String>{};
     final logs = <String>[];
@@ -2126,7 +2284,8 @@ class TomorrowDialEngine {
         return false;
       }
       if (usedTrainIds.contains(train.id)) {
-        logs.add('slot ${slot.slot}: skipped($reason), train ${train.id} already used');
+        logs.add(
+            'slot ${slot.slot}: skipped($reason), train ${train.id} already used');
         return false;
       }
 
@@ -2152,7 +2311,9 @@ class TomorrowDialEngine {
           ) ??
           pickForSlot(
             tomorrowReserveSlot,
-            (t) => t.has(TrainStatus.okdongStay) && !t.has(TrainStatus.okdongReserve),
+            (t) =>
+                t.has(TrainStatus.okdongStay) &&
+                !t.has(TrainStatus.okdongReserve),
           );
       if (reserve != null) {
         assignSlot(
@@ -2166,14 +2327,17 @@ class TomorrowDialEngine {
       }
     }
 
-    final okdongOutboundSlots = slots.where((s) => _isOkdongLane(s.lane) && s.slot != 18).toList()
+    final okdongOutboundSlots = slots
+        .where((s) => _isOkdongLane(s.lane) && s.slot != 18)
+        .toList()
       ..sort((a, b) => a.slot.compareTo(b.slot));
 
     final firstOkdongOutbound = firstOrNull(
       okdongOutboundSlots.where((s) => !assignmentsBySlot.containsKey(s.slot)),
     );
     if (firstOkdongOutbound != null) {
-      final reserveOut = pickForSlot(firstOkdongOutbound, (t) => t.has(TrainStatus.okdongReserve));
+      final reserveOut = pickForSlot(
+          firstOkdongOutbound, (t) => t.has(TrainStatus.okdongReserve));
       if (reserveOut != null) {
         assignSlot(
           firstOkdongOutbound,
@@ -2182,24 +2346,21 @@ class TomorrowDialEngine {
           reason: 'L1 today reserve must outbound',
         );
       } else {
-        logs.add('slot ${firstOkdongOutbound.slot}: no candidate for L1 today reserve outbound');
+        logs.add(
+            'slot ${firstOkdongOutbound.slot}: no candidate for L1 today reserve outbound');
       }
     }
 
     // Level 2: okdong structure + forbidden filter
     for (final slot in okdongOutboundSlots) {
       if (assignmentsBySlot.containsKey(slot.slot)) continue;
-      final train =
-          pickForSlot(slot, (t) => t.has(TrainStatus.okdongStay)) ?? pickForSlot(slot, (t) => true);
+      final train = pickForSlot(slot, (t) => t.has(TrainStatus.okdongStay));
       if (train != null) {
-        final reason = train.has(TrainStatus.okdongStay)
-            ? 'L2 keep okdong structure'
-            : 'L2 keep okdong structure (fallback)';
         assignSlot(
           slot,
           train,
           note: statusLabel(TrainStatus.okdongStay),
-          reason: reason,
+          reason: 'L2 keep okdong structure',
         );
       } else {
         logs.add('slot ${slot.slot}: unassigned at L2 (no okdong candidate)');
@@ -2209,6 +2370,7 @@ class TomorrowDialEngine {
     // Level 3: fixed status slots
     for (final slot in slots) {
       if (assignmentsBySlot.containsKey(slot.slot)) continue;
+      if (_isOkdongLane(slot.lane)) continue;
       final fixedStatus = fixedStatusSlots[slot.slot];
       if (fixedStatus == null) continue;
 
@@ -2225,17 +2387,20 @@ class TomorrowDialEngine {
           reason: 'L3 fixed slot ${statusLabel(fixedStatus)}',
         );
       } else {
-        logs.add('slot ${slot.slot}: no candidate for L3 fixed slot ${statusLabel(fixedStatus)}');
+        logs.add(
+            'slot ${slot.slot}: no candidate for L3 fixed slot ${statusLabel(fixedStatus)}');
       }
     }
 
     // Level 4: dial guidance
     for (final slot in slots) {
       if (assignmentsBySlot.containsKey(slot.slot)) continue;
+      if (_isOkdongLane(slot.lane)) continue;
       final train = pickForSlot(slot, (t) => _matchesDialGuide(t, slot));
       if (train != null) {
         final fixedStatus = fixedStatusSlots[slot.slot];
-        final note = fixedStatus == null ? '' : '${statusLabel(fixedStatus)} 보강';
+        final note =
+            fixedStatus == null ? '' : '${statusLabel(fixedStatus)} 보강';
         assignSlot(
           slot,
           train,
@@ -2248,6 +2413,11 @@ class TomorrowDialEngine {
     // Level 5: deterministic mileage fallback
     for (final slot in slots) {
       if (assignmentsBySlot.containsKey(slot.slot)) continue;
+      if (_isOkdongLane(slot.lane)) {
+        logs.add(
+            'slot ${slot.slot}: unassigned at L5 (okdong-only slot requires okdong stay train)');
+        continue;
+      }
       final fixedStatus = fixedStatusSlots[slot.slot];
       final train = pickForSlot(
         slot,
@@ -2255,7 +2425,8 @@ class TomorrowDialEngine {
         highMileage: fixedStatus == TrainStatus.oneLoop,
       );
       if (train != null) {
-        final note = fixedStatus == null ? '' : '${statusLabel(fixedStatus)} 대체';
+        final note =
+            fixedStatus == null ? '' : '${statusLabel(fixedStatus)} 대체';
         assignSlot(
           slot,
           train,
@@ -2267,9 +2438,13 @@ class TomorrowDialEngine {
       }
     }
 
-    final assignments = assignmentsBySlot.values.toList()..sort((a, b) => a.slot.compareTo(b.slot));
-    final unassignedSlots =
-        slots.where((s) => !assignmentsBySlot.containsKey(s.slot)).map((s) => s.slot).toList()..sort();
+    final assignments = assignmentsBySlot.values.toList()
+      ..sort((a, b) => a.slot.compareTo(b.slot));
+    final unassignedSlots = slots
+        .where((s) => !assignmentsBySlot.containsKey(s.slot))
+        .map((s) => s.slot)
+        .toList()
+      ..sort();
     if (unassignedSlots.isNotEmpty) {
       logs.add('unassigned slots: ${unassignedSlots.join(', ')}');
     }
@@ -2286,62 +2461,11 @@ class TomorrowDialEngine {
     required ParsedCompanyDial todayDial,
     required Set<String> okdongForbidden,
   }) {
-    final slots = todayDial.departureRows.take(18).toList();
-    final assigned = <TomorrowAssignment>[];
-    final used = <String>{};
-    final available = trains.where((t) => !_isExcluded(t)).toList()
-      ..sort((a, b) => a.mileage.compareTo(b.mileage));
-
-    TomorrowAssignment assign(ParsedDepartureRow slot, Train train, String note) {
-      used.add(train.id);
-      return TomorrowAssignment(
-        slot: slot.slot,
-        trainId: train.id,
-        departureMins: slot.departureMins,
-        lane: slot.lane,
-        note: note,
-      );
-    }
-
-    Train? pick(bool Function(Train) test, {bool highMileage = false}) {
-      final pool = available.where((t) => !used.contains(t.id) && test(t)).toList();
-      pool.sort((a, b) => highMileage ? b.mileage.compareTo(a.mileage) : a.mileage.compareTo(b.mileage));
-      return firstOrNull(pool);
-    }
-
-    final tomorrowReserveSlot = firstOrNull(slots.where((s) => s.slot == 18));
-    if (tomorrowReserveSlot != null) {
-      final reserve = pick((t) => t.has(TrainStatus.tomorrowReserve) && !okdongForbidden.contains(t.id)) ??
-          pick((t) => t.has(TrainStatus.okdongStay) && !t.has(TrainStatus.okdongReserve) && !okdongForbidden.contains(t.id));
-      if (reserve != null) {
-        assigned.add(assign(tomorrowReserveSlot, reserve, '명일 옥동 예비'));
-      }
-    }
-
-    for (final slot in slots.where((s) => _isOkdongLane(s.lane) && s.slot != 18)) {
-      final train = pick((t) => t.has(TrainStatus.okdongReserve) && !okdongForbidden.contains(t.id)) ??
-          pick((t) => t.has(TrainStatus.okdongStay) && !okdongForbidden.contains(t.id)) ??
-          pick((t) => !okdongForbidden.contains(t.id));
-      if (train != null) {
-        assigned.add(assign(slot, train, train.has(TrainStatus.okdongReserve) ? '금일 옥동 예비 출고' : '옥동 출고'));
-      }
-    }
-
-    for (final slot in slots.where((s) => !usedSlots(assigned).contains(s.slot))) {
-      final fixedStatus = fixedStatusSlots[slot.slot];
-      Train? train;
-      if (fixedStatus != null) {
-        train = pick((t) => t.has(fixedStatus), highMileage: fixedStatus == TrainStatus.oneLoop);
-      }
-      train ??= pick((t) => _matchesDialGuide(t, slot));
-      train ??= pick((t) => true);
-      if (train != null) {
-        assigned.add(assign(slot, train, fixedStatus == null ? '' : statusLabel(fixedStatus)));
-      }
-    }
-
-    assigned.sort((a, b) => a.slot.compareTo(b.slot));
-    return assigned;
+    return generateDetailed(
+      trains: trains,
+      todayDial: todayDial,
+      okdongForbidden: okdongForbidden,
+    ).assignments;
   }
 
   static Set<int> usedSlots(List<TomorrowAssignment> assigned) {
@@ -2361,15 +2485,20 @@ class TomorrowDialEngine {
     Train b, {
     required bool highMileage,
   }) {
-    final mileageCompare = highMileage ? b.mileage.compareTo(a.mileage) : a.mileage.compareTo(b.mileage);
+    final mileageCompare = highMileage
+        ? b.mileage.compareTo(a.mileage)
+        : a.mileage.compareTo(b.mileage);
     if (mileageCompare != 0) return mileageCompare;
     return a.id.compareTo(b.id);
   }
 
   static bool _matchesDialGuide(Train train, ParsedDepartureRow slot) {
-    if (train.has(TrainStatus.longDia)) return slot.note.contains('10') || slot.note.contains('6.5');
-    if (train.has(TrainStatus.mediumDia)) return slot.note.contains('5.5') || slot.note.contains('4');
-    if (train.has(TrainStatus.shortDia)) return slot.note.contains('2') || slot.note.contains('3');
+    if (train.has(TrainStatus.longDia))
+      return slot.note.contains('10') || slot.note.contains('6.5');
+    if (train.has(TrainStatus.mediumDia))
+      return slot.note.contains('5.5') || slot.note.contains('4');
+    if (train.has(TrainStatus.shortDia))
+      return slot.note.contains('2') || slot.note.contains('3');
     return false;
   }
 }
@@ -2380,26 +2509,33 @@ class CompanyExcelWriter {
     required List<TomorrowAssignment> assignments,
     DoubleParkingResult? doubleParkingResult,
   }) {
-    final xlsx = XlsxSheetDoc.fromBytes(templateBytes, preferredSheetName: '평일');
+    final xlsx =
+        XlsxSheetDoc.fromBytes(templateBytes, preferredSheetName: '평일');
 
-    final bySlot = {for (final assignment in assignments) assignment.slot: assignment};
+    final bySlot = {
+      for (final assignment in assignments) assignment.slot: assignment
+    };
     for (final row in xlsx.rows) {
       final rowNum = xlsx.rowNumber(row);
       if (rowNum <= CompanyDialParser.headerRow + 1) continue;
 
-      final slot = CompanyDialParser._parseSlot(xlsx.readCellValue(row, CompanyDialParser.outSlotCol), -1);
+      final slot = CompanyDialParser._parseSlot(
+          xlsx.readCellValue(row, CompanyDialParser.outSlotCol), -1);
       final assignment = bySlot[slot];
       if (assignment == null) continue;
 
-      xlsx.writeCell(row, CompanyDialParser.outTrainCol, assignment.trainId, asText: true);
+      xlsx.writeCell(row, CompanyDialParser.outTrainCol, assignment.trainId,
+          asText: true);
       xlsx.writeCell(
         row,
         CompanyDialParser.outTimeCol,
         TimeParser.toExcelTime(assignment.departureMins),
         asText: false,
       );
-      xlsx.writeCell(row, CompanyDialParser.outLaneCol, assignment.lane, asText: true);
-      xlsx.writeCell(row, CompanyDialParser.outNoteCol, assignment.note, asText: true);
+      xlsx.writeCell(row, CompanyDialParser.outLaneCol, assignment.lane,
+          asText: true);
+      xlsx.writeCell(row, CompanyDialParser.outNoteCol, assignment.note,
+          asText: true);
     }
 
     if (doubleParkingResult != null) {
@@ -2409,7 +2545,8 @@ class CompanyExcelWriter {
     return xlsx.encode();
   }
 
-  static void _writeDoubleParkingBlock(XlsxSheetDoc xlsx, DoubleParkingResult result) {
+  static void _writeDoubleParkingBlock(
+      XlsxSheetDoc xlsx, DoubleParkingResult result) {
     const int startCol = 22; // W
     var row = 4;
 
@@ -2419,13 +2556,16 @@ class CompanyExcelWriter {
     xlsx.writeAt(row, startCol + 1, result.globalInboundGuide, asText: true);
     row++;
     xlsx.writeAt(row, startCol, '옥동 일반4', asText: true);
-    xlsx.writeAt(row, startCol + 1, result.okdongSummary.normalIds.join(', '), asText: true);
+    xlsx.writeAt(row, startCol + 1, result.okdongSummary.normalIds.join(', '),
+        asText: true);
     row++;
     xlsx.writeAt(row, startCol, '옥동 예비1', asText: true);
-    xlsx.writeAt(row, startCol + 1, result.okdongSummary.reserveId ?? '미확인', asText: true);
+    xlsx.writeAt(row, startCol + 1, result.okdongSummary.reserveId ?? '미확인',
+        asText: true);
     row++;
     xlsx.writeAt(row, startCol, '옥동 총합', asText: true);
-    xlsx.writeAt(row, startCol + 1, result.okdongSummary.allIds.join(', '), asText: true);
+    xlsx.writeAt(row, startCol + 1, result.okdongSummary.allIds.join(', '),
+        asText: true);
     row++;
 
     final allWarnings = <String>[
@@ -2447,7 +2587,8 @@ class CompanyExcelWriter {
 
     for (final line in result.lines) {
       xlsx.writeAt(row, startCol, line.lineName, asText: true);
-      xlsx.writeAt(row, startCol + 1, _entriesText(line.outbound), asText: true);
+      xlsx.writeAt(row, startCol + 1, _entriesText(line.outbound),
+          asText: true);
       xlsx.writeAt(row, startCol + 2, _entriesText(line.inbound), asText: true);
       xlsx.writeAt(row, startCol + 3, line.warnings.join(' | '), asText: true);
       row++;
@@ -2456,6 +2597,8 @@ class CompanyExcelWriter {
 
   static String _entriesText(List<DoubleParkingEntry> entries) {
     if (entries.isEmpty) return '없음';
-    return entries.map((e) => '${e.trainId}(${TimeParser.format(e.timeMins)})').join(', ');
+    return entries
+        .map((e) => '${e.trainId}(${TimeParser.format(e.timeMins)})')
+        .join(', ');
   }
 }
