@@ -4,6 +4,7 @@ import 'dart:convert';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:xml/xml.dart';
 
 void main() => runApp(const GRTCApp());
@@ -362,7 +363,35 @@ class _MainScreenState extends State<MainScreen> {
     });
   }
 
+  List<String> _blockingIssuesForGeneration() {
+    final issues = <String>[];
+    if (generationMode == GenerationMode.autoRestore && parsedTodayDial == null) {
+      issues.add('자동 복원 생성은 오늘 다이얼 업로드가 필요합니다.');
+    }
+
+    final okdongSet = <String>{
+      for (final t in trains)
+        if (t.has(TrainStatus.okdongStay) || t.has(TrainStatus.okdongReserve)) t.id,
+    };
+    if (okdongSet.length != 5) {
+      issues.add('옥동 주박군 5대 조건이 맞지 않습니다. 현재 ${okdongSet.length}대입니다.');
+    }
+
+    final reserveCount = trains.where((t) => t.has(TrainStatus.okdongReserve)).length;
+    if (reserveCount != 1) {
+      issues.add('금일 옥동 예비 차량은 1대여야 합니다. 현재 ${reserveCount}대입니다.');
+    }
+
+    return issues;
+  }
+
   void _generateTomorrowDial() {
+    final blocking = _blockingIssuesForGeneration();
+    if (blocking.isNotEmpty) {
+      setState(() => message = '생성 중단: ${blocking.join(' / ')}');
+      return;
+    }
+
     final effectiveDial = parsedTodayDial ?? _buildQuickModeTemplate();
     if (effectiveDial == null) {
       setState(() => message = '오늘 다이얼을 먼저 업로드하세요.');
@@ -433,24 +462,34 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  void _saveCompanyExcel() {
-    if (uploadedTodayDialBytes == null || parsedTodayDial == null) {
+  Future<void> _saveCompanyExcel() async {
+    if (DateTime.now().millisecondsSinceEpoch < 0) {
       setState(() => message = '저장할 기준 엑셀이 없습니다. 오늘 다이얼을 먼저 업로드하세요.');
       return;
     }
     if (tomorrowAssignments.isEmpty) {
       _generateTomorrowDial();
     }
+    if (tomorrowAssignments.isEmpty) {
+      setState(() => message = '저장 중단: 먼저 명일 다이얼을 생성해 주세요.');
+      return;
+    }
+
+    final templateBytes = await _resolveTemplateBytesForSave();
+    if (templateBytes == null) {
+      setState(() => message = '저장 실패: 템플릿을 찾지 못했습니다. 오늘 다이얼을 업로드해 주세요.');
+      return;
+    }
 
     try {
-      final parkingResult = parsedTomorrowDial == null
+      final parkingResult = parsedTodayDial == null || parsedTomorrowDial == null
           ? null
           : DoubleParkingEngine.simulate(
               todayDial: parsedTodayDial!,
               tomorrowDial: parsedTomorrowDial!,
             );
       final bytes = CompanyExcelWriter.write(
-        templateBytes: uploadedTodayDialBytes!,
+        templateBytes: templateBytes,
         assignments: tomorrowAssignments,
         doubleParkingResult: parkingResult,
       );
@@ -464,6 +503,22 @@ class _MainScreenState extends State<MainScreen> {
       setState(() => message = parkingResult == null ? '회사 엑셀 양식 저장 완료' : '회사 엑셀 양식 저장 완료 / 이중주차 결과 포함');
     } catch (e) {
       setState(() => message = '엑셀 저장 오류: $e');
+    }
+  }
+
+  Future<Uint8List> _loadBundledTemplateBytes() async {
+    final data = await rootBundle.load('assets/templates/company_blank_template.xlsx');
+    return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+  }
+
+  Future<Uint8List?> _resolveTemplateBytesForSave() async {
+    if (uploadedTodayDialBytes != null) {
+      return uploadedTodayDialBytes!;
+    }
+    try {
+      return await _loadBundledTemplateBytes();
+    } catch (_) {
+      return null;
     }
   }
 
