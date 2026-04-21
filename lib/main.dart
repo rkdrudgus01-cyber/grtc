@@ -618,6 +618,7 @@ class _MainScreenState extends State<MainScreen> {
             ),
           if (viewMode == ViewMode.dial) _buildWarningPanel(),
           if (viewMode == ViewMode.dial) _buildNeedsReviewPanel(),
+          if (viewMode == ViewMode.dial) _buildGenerationLogPanel(),
           Expanded(
             child: viewMode == ViewMode.dial
                 ? Row(
@@ -1143,7 +1144,53 @@ class _MainScreenState extends State<MainScreen> {
         ),
       );
     }
+    if (parsedTodayDial != null) {
+      final turnbackWarnings = TomorrowDialEngine.evaluateTurnbackGaps(
+        parsedTodayDial!.departureRows.take(18).toList(),
+      );
+      for (final warning in turnbackWarnings) {
+        warnings.add(
+          DialWarning(
+            severity: WarningSeverity.advisory,
+            message: warning,
+          ),
+        );
+      }
+    }
     return warnings;
+  }
+
+  Widget _buildGenerationLogPanel() {
+    if (generationLogs.isEmpty) return const SizedBox.shrink();
+    final preview = generationLogs.length <= 10
+        ? generationLogs
+        : generationLogs.sublist(generationLogs.length - 10);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: Card(
+        color: Colors.blueGrey.shade50,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '배정 로그 (${generationLogs.length}건)',
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                preview.join('\n'),
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildAssignmentPanel() {
@@ -2235,6 +2282,7 @@ class DoubleParkingEngine {
 }
 
 class TomorrowDialEngine {
+  static const int minTurnbackMinutes = 105;
   static const Map<int, TrainStatus> fixedStatusSlots = {
     3: TrainStatus.cleaning,
     5: TrainStatus.night7D,
@@ -2245,6 +2293,30 @@ class TomorrowDialEngine {
     12: TrainStatus.oneLoop,
     13: TrainStatus.oneLoop,
   };
+  static const Map<int, int> circulationPairSlots = {
+    7: 10,
+    9: 15,
+  };
+
+  static List<String> evaluateTurnbackGaps(List<ParsedDepartureRow> slots) {
+    final warnings = <String>[];
+    final bySlot = <int, ParsedDepartureRow>{
+      for (final slot in slots) slot.slot: slot
+    };
+    for (final pair in circulationPairSlots.entries) {
+      final from = bySlot[pair.key];
+      final to = bySlot[pair.value];
+      if (from == null || to == null) continue;
+      final gap = _turnbackGapMinutes(from.departureMins, to.departureMins);
+      if (gap < 0) continue;
+      if (gap < minTurnbackMinutes) {
+        warnings.add(
+          '105분 회차 점검: ${pair.key}→${pair.value} 간격 ${gap}분 (기준 ${minTurnbackMinutes}분 미만)',
+        );
+      }
+    }
+    return warnings;
+  }
 
   static TomorrowDialGenerationResult generateDetailed({
     required List<Train> trains,
@@ -2253,8 +2325,12 @@ class TomorrowDialEngine {
   }) {
     final slots = todayDial.departureRows.take(18).toList()
       ..sort((a, b) => a.slot.compareTo(b.slot));
+    final slotByNumber = <int, ParsedDepartureRow>{
+      for (final slot in slots) slot.slot: slot
+    };
     final assignmentsBySlot = <int, TomorrowAssignment>{};
     final usedTrainIds = <String>{};
+    final usedSlotsByTrain = <String, Set<int>>{};
     final logs = <String>[];
     final available = trains.where((t) => !_isExcluded(t)).toList();
 
@@ -2284,9 +2360,16 @@ class TomorrowDialEngine {
         return false;
       }
       if (usedTrainIds.contains(train.id)) {
-        logs.add(
-            'slot ${slot.slot}: skipped($reason), train ${train.id} already used');
-        return false;
+        if (!_canReuseForPairSlot(
+          trainId: train.id,
+          toSlot: slot.slot,
+          usedSlotsByTrain: usedSlotsByTrain,
+          slotByNumber: slotByNumber,
+        )) {
+          logs.add(
+              'slot ${slot.slot}: skipped($reason), train ${train.id} already used');
+          return false;
+        }
       }
 
       assignmentsBySlot[slot.slot] = TomorrowAssignment(
@@ -2298,6 +2381,7 @@ class TomorrowDialEngine {
         reason: reason,
       );
       usedTrainIds.add(train.id);
+      usedSlotsByTrain.putIfAbsent(train.id, () => <int>{}).add(slot.slot);
       logs.add('slot ${slot.slot}: ${train.id} ($reason)');
       return true;
     }
@@ -2364,6 +2448,54 @@ class TomorrowDialEngine {
         );
       } else {
         logs.add('slot ${slot.slot}: unassigned at L2 (no okdong candidate)');
+      }
+    }
+
+    // Level 2.5: fixed circulation pair priority (7->10, 9->15) with 105-minute rule
+    for (final pair in circulationPairSlots.entries) {
+      final fromSlot = slotByNumber[pair.key];
+      final toSlot = slotByNumber[pair.value];
+      if (fromSlot == null || toSlot == null) continue;
+      if (assignmentsBySlot.containsKey(fromSlot.slot) ||
+          assignmentsBySlot.containsKey(toSlot.slot)) {
+        continue;
+      }
+
+      final gap =
+          _turnbackGapMinutes(fromSlot.departureMins, toSlot.departureMins);
+      if (gap < minTurnbackMinutes) {
+        logs.add(
+          'slot ${fromSlot.slot}->${toSlot.slot}: skip circulation pair (turnback ${gap < 0 ? '미확인' : '${gap}분'})',
+        );
+        continue;
+      }
+
+      final pairTrain = pickForSlot(
+        fromSlot,
+        (t) => t.has(TrainStatus.morning7D) && t.has(TrainStatus.afternoon7D),
+      );
+      if (pairTrain == null) {
+        continue;
+      }
+
+      final morningAssigned = assignSlot(
+        fromSlot,
+        pairTrain,
+        note: statusLabel(TrainStatus.morning7D),
+        reason: 'L2.5 circulation pair start',
+      );
+      if (!morningAssigned) continue;
+
+      final afternoonAssigned = assignSlot(
+        toSlot,
+        pairTrain,
+        note:
+            '${statusLabel(TrainStatus.afternoon7D)} / ${minTurnbackMinutes}분 회차',
+        reason: 'L2.5 circulation pair follow (${gap}분)',
+      );
+      if (!afternoonAssigned) {
+        logs.add(
+            'slot ${toSlot.slot}: circulation follow failed for ${pairTrain.id}');
       }
     }
 
@@ -2470,6 +2602,44 @@ class TomorrowDialEngine {
 
   static Set<int> usedSlots(List<TomorrowAssignment> assigned) {
     return assigned.map((a) => a.slot).toSet();
+  }
+
+  static bool _canReuseForPairSlot({
+    required String trainId,
+    required int toSlot,
+    required Map<String, Set<int>> usedSlotsByTrain,
+    required Map<int, ParsedDepartureRow> slotByNumber,
+  }) {
+    final usedSlots = usedSlotsByTrain[trainId];
+    if (usedSlots == null || usedSlots.isEmpty) return false;
+    if (usedSlots.length != 1) return false;
+
+    final fromSlot = usedSlots.first;
+    final expectedFrom = _pairFromSlot(toSlot);
+    if (expectedFrom == null || fromSlot != expectedFrom) return false;
+
+    final fromRow = slotByNumber[fromSlot];
+    final toRow = slotByNumber[toSlot];
+    if (fromRow == null || toRow == null) return false;
+    final gap = _turnbackGapMinutes(fromRow.departureMins, toRow.departureMins);
+    return gap >= minTurnbackMinutes;
+  }
+
+  static int? _pairFromSlot(int toSlot) {
+    for (final pair in circulationPairSlots.entries) {
+      if (pair.value == toSlot) return pair.key;
+    }
+    return null;
+  }
+
+  static int _turnbackGapMinutes(int fromMins, int toMins) {
+    if (fromMins == TimeParser.unknown || toMins == TimeParser.unknown)
+      return -1;
+    var gap = toMins - fromMins;
+    while (gap < 0) {
+      gap += 24 * 60;
+    }
+    return gap;
   }
 
   static bool _isExcluded(Train train) {
