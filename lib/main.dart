@@ -30,6 +30,17 @@ enum ViewMode {
   doubleParking,
 }
 
+enum GenerationMode {
+  quickManual,
+  autoRestore,
+}
+
+enum TrainListFilter {
+  all,
+  needsReview,
+  okdongOnly,
+}
+
 const Map<TrainStatus, String> kStatusLabel = {
   TrainStatus.maintenance: '중정비',
   TrainStatus.outOfService: '운휴',
@@ -202,6 +213,9 @@ class _MainScreenState extends State<MainScreen> {
   List<int> unassignedTomorrowSlots = const [];
   Set<String> okdongForbidden = {};
   ViewMode viewMode = ViewMode.dial;
+  GenerationMode generationMode = GenerationMode.autoRestore;
+  TrainListFilter trainListFilter = TrainListFilter.all;
+  String trainSearch = '';
   String message = '오늘 다이얼 미업로드';
 
   static List<Train> _initialTrains() {
@@ -349,19 +363,22 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   void _generateTomorrowDial() {
-    if (parsedTodayDial == null) {
+    final effectiveDial = parsedTodayDial ?? _buildQuickModeTemplate();
+    if (effectiveDial == null) {
       setState(() => message = '오늘 다이얼을 먼저 업로드하세요.');
       return;
     }
 
     final generated = TomorrowDialEngine.generateDetailed(
       trains: trains,
-      todayDial: parsedTodayDial!,
+      todayDial: effectiveDial,
       okdongForbidden: okdongForbidden,
     );
+    /*
 
-    final unassignedSuffix = generated.unassignedSlots.isEmpty
-        ? ''
+    final modeText = parsedTodayDial == null ? '빠른 생성' : '자동 복원';
+    final unassignedSuffix =
+        generated.unassignedSlots.isEmpty ? '' : ' / 미배정 ${generated.unassignedSlots.join(', ')}';
         : ' / 미배정 ${generated.unassignedSlots.join(', ')}';
     setState(() {
       tomorrowAssignments = generated.assignments;
@@ -370,9 +387,50 @@ class _MainScreenState extends State<MainScreen> {
       message = '명일 다이얼 생성 완료 / ${generated.length}개 슬롯 배정$unassignedSuffix';
     });
 
+    */
+    final modeText = parsedTodayDial == null ? '빠른 생성' : '자동 복원 생성';
+    final unassignedSuffix =
+        generated.unassignedSlots.isEmpty ? '' : ' / 미배정 ${generated.unassignedSlots.join(', ')}';
+    setState(() {
+      tomorrowAssignments = generated.assignments;
+      generationLogs = generated.logs;
+      unassignedTomorrowSlots = generated.unassignedSlots;
+      message = '$modeText 완료 / ${generated.length}개 슬롯 배정$unassignedSuffix';
+    });
+
     for (final log in generated.logs) {
       debugPrint('[TomorrowDial] $log');
     }
+  }
+
+  ParsedCompanyDial? _buildQuickModeTemplate() {
+    if (generationMode != GenerationMode.quickManual) return null;
+
+    const okdongLanes = <int, String>{
+      14: '옥동1',
+      15: '옥동2',
+      16: '옥동3',
+      17: '옥동4',
+      18: '옥동예비',
+    };
+
+    final rows = List<ParsedDepartureRow>.generate(18, (index) {
+      final slot = index + 1;
+      return ParsedDepartureRow(
+        slot: slot,
+        trainId: '',
+        departureMins: TimeParser.unknown,
+        lane: okdongLanes[slot] ?? '용산',
+        note: '',
+      );
+    });
+
+    return ParsedCompanyDial(
+      departures: const {},
+      departureRows: rows,
+      arrivals: const [],
+      okdongReserveFromG35: null,
+    );
   }
 
   void _saveCompanyExcel() {
@@ -421,6 +479,9 @@ class _MainScreenState extends State<MainScreen> {
       unassignedTomorrowSlots = const [];
       okdongForbidden.clear();
       viewMode = ViewMode.dial;
+      generationMode = GenerationMode.autoRestore;
+      trainListFilter = TrainListFilter.all;
+      trainSearch = '';
       message = '전체 초기화 완료';
     });
   }
@@ -486,12 +547,38 @@ class _MainScreenState extends State<MainScreen> {
               },
             ),
           ),
+          if (viewMode == ViewMode.dial)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: SegmentedButton<GenerationMode>(
+                segments: const [
+                  ButtonSegment(
+                    value: GenerationMode.quickManual,
+                    label: Text('빠른 생성'),
+                  ),
+                  ButtonSegment(
+                    value: GenerationMode.autoRestore,
+                    label: Text('자동 복원 생성'),
+                  ),
+                ],
+                selected: {generationMode},
+                onSelectionChanged: (selected) {
+                  setState(() {
+                    generationMode = selected.first;
+                  });
+                },
+              ),
+            ),
+          if (viewMode == ViewMode.dial) _buildWarningPanel(),
+          if (viewMode == ViewMode.dial) _buildNeedsReviewPanel(),
           Expanded(
             child: viewMode == ViewMode.dial
                 ? Row(
                     children: [
                       Expanded(flex: 3, child: _buildStatusPanel()),
-                      Expanded(flex: 7, child: _buildTrainList()),
+                      Expanded(flex: 5, child: _buildTrainListV2()),
+                      Expanded(flex: 4, child: _buildAssignmentPanel()),
                     ],
                   )
                 : _buildDoubleParkingSimulator(),
@@ -559,6 +646,7 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  // ignore: unused_element
   Widget _buildTrainList() {
     return ListView.builder(
       padding: const EdgeInsets.all(12),
@@ -646,6 +734,354 @@ class _MainScreenState extends State<MainScreen> {
     return assigned
         .map((a) => '명일 ${a.slot}번 ${a.lane} ${TimeParser.format(a.departureMins)} ${a.note}'.trim())
         .join(' / ');
+  }
+
+  Widget _buildTrainListV2() {
+    final visibleTrains = _visibleTrainsV2();
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+          child: TextField(
+            onChanged: (value) {
+              setState(() {
+                trainSearch = value.trim();
+              });
+            },
+            decoration: const InputDecoration(
+              isDense: true,
+              border: OutlineInputBorder(),
+              prefixIcon: Icon(Icons.search),
+              hintText: '편성 검색',
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          child: SegmentedButton<TrainListFilter>(
+            segments: const [
+              ButtonSegment(
+                value: TrainListFilter.all,
+                label: Text('전체'),
+              ),
+              ButtonSegment(
+                value: TrainListFilter.needsReview,
+                label: Text('확인 필요'),
+              ),
+              ButtonSegment(
+                value: TrainListFilter.okdongOnly,
+                label: Text('옥동'),
+              ),
+            ],
+            selected: {trainListFilter},
+            onSelectionChanged: (selected) {
+              setState(() {
+                trainListFilter = selected.first;
+              });
+            },
+          ),
+        ),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.all(12),
+            itemCount: visibleTrains.length,
+            itemBuilder: (_, i) {
+              final train = visibleTrains[i];
+              final forbidden = okdongForbidden.contains(train.id);
+              final reviewReasons = _reviewReasons(train);
+
+              return Card(
+                margin: const EdgeInsets.symmetric(vertical: 6),
+                child: ExpansionTile(
+                  leading: CircleAvatar(
+                    radius: 24,
+                    backgroundColor: forbidden ? Colors.red : Colors.blue,
+                    child: Text(
+                      train.id,
+                      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  title: Text(
+                    '${train.id} / 출고 ${TimeParser.format(train.departureMins)}',
+                    style: const TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: train.statuses.map((s) {
+                            return InputChip(
+                              label: Text(statusLabel(s)),
+                              onDeleted: () => _toggleStatus(train.id, s),
+                            );
+                          }).toList(),
+                        ),
+                        if (reviewReasons.isNotEmpty) const SizedBox(height: 8),
+                        if (reviewReasons.isNotEmpty)
+                          Text(
+                            '확인 필요: ${reviewReasons.join(' / ')}',
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.deepOrange,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  trailing: SizedBox(
+                    width: 128,
+                    child: forbidden
+                        ? FilledButton(
+                            onPressed: () => _toggleOkdongForbidden(train.id),
+                            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                            child: const Text('옥동금지', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                          )
+                        : OutlinedButton(
+                            onPressed: () => _toggleOkdongForbidden(train.id),
+                            child: const Text('옥동허용', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                          ),
+                  ),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: TrainStatus.values.map((s) {
+                          final active = train.statuses.contains(s);
+                          return FilterChip(
+                            selected: active,
+                            onSelected: (_) => _toggleStatus(train.id, s),
+                            label: Text(statusLabel(s)),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                    if (tomorrowAssignments.any((a) => a.trainId == train.id))
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            _tomorrowSummaryWithReason(train.id),
+                            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  List<Train> _visibleTrainsV2() {
+    final query = trainSearch.trim();
+    final filtered = trains.where((train) {
+      if (query.isNotEmpty && !train.id.contains(query)) return false;
+      switch (trainListFilter) {
+        case TrainListFilter.all:
+          return true;
+        case TrainListFilter.needsReview:
+          return _trainNeedsReview(train);
+        case TrainListFilter.okdongOnly:
+          return train.has(TrainStatus.okdongStay) || train.has(TrainStatus.okdongReserve);
+      }
+    }).toList();
+    filtered.sort((a, b) => (int.tryParse(a.id) ?? 9999).compareTo(int.tryParse(b.id) ?? 9999));
+    return filtered;
+  }
+
+  bool _trainNeedsReview(Train train) => _reviewReasons(train).isNotEmpty;
+
+  List<String> _reviewReasons(Train train) {
+    final reasons = <String>[];
+
+    final hasExcluded = train.has(TrainStatus.outOfService) ||
+        train.has(TrainStatus.maintenance) ||
+        train.has(TrainStatus.research);
+    final hasRunLike = train.has(TrainStatus.longDia) ||
+        train.has(TrainStatus.mediumDia) ||
+        train.has(TrainStatus.shortDia) ||
+        train.has(TrainStatus.oneLoop) ||
+        train.has(TrainStatus.night7D) ||
+        train.has(TrainStatus.morning7D) ||
+        train.has(TrainStatus.afternoon7D);
+    if (hasExcluded && hasRunLike) {
+      reasons.add('운영 제외와 운행 상태 동시 지정');
+    }
+
+    final sevenDCount = [
+      TrainStatus.night7D,
+      TrainStatus.morning7D,
+      TrainStatus.afternoon7D,
+    ].where((s) => train.has(s)).length;
+    if (sevenDCount > 1) {
+      reasons.add('7D 복수 지정');
+    }
+
+    final hasOkdongStatus =
+        train.has(TrainStatus.okdongStay) || train.has(TrainStatus.okdongReserve) || train.has(TrainStatus.tomorrowReserve);
+    if (okdongForbidden.contains(train.id) && hasOkdongStatus) {
+      reasons.add('옥동금지와 옥동상태 충돌');
+    }
+
+    return reasons;
+  }
+
+  String _tomorrowSummaryWithReason(String trainId) {
+    final assigned = tomorrowAssignments.where((a) => a.trainId == trainId).toList();
+    return assigned.map((a) {
+      final reason = a.reason.isEmpty ? '' : ' [${a.reason}]';
+      return '명일 ${a.slot}번 ${a.lane} ${TimeParser.format(a.departureMins)} ${a.note}$reason'.trim();
+    }).join(' / ');
+  }
+
+  Widget _buildNeedsReviewPanel() {
+    final targets = trains.where(_trainNeedsReview).toList()
+      ..sort((a, b) => (int.tryParse(a.id) ?? 9999).compareTo(int.tryParse(b.id) ?? 9999));
+    if (targets.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: Card(
+        color: Colors.orange.shade50,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: targets.take(8).map((train) {
+              final reason = _reviewReasons(train).join(', ');
+              return Chip(
+                label: Text('${train.id}: $reason'),
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWarningPanel() {
+    final warnings = _collectDialWarnings();
+    if (warnings.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: Card(
+        color: Colors.red.shade50,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Text(
+            warnings.map((w) => '경고: $w').join('\n'),
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<String> _collectDialWarnings() {
+    final warnings = <String>[];
+    if (generationMode == GenerationMode.autoRestore && parsedTodayDial == null) {
+      warnings.add('자동 복원 생성은 오늘 다이얼 업로드가 필요합니다.');
+    }
+
+    final okdongSet = <String>{
+      for (final t in trains)
+        if (t.has(TrainStatus.okdongStay) || t.has(TrainStatus.okdongReserve)) t.id,
+    };
+    final reserveCount = trains.where((t) => t.has(TrainStatus.okdongReserve)).length;
+    if (okdongSet.length != 5) {
+      warnings.add('옥동 주박군이 5대가 아닙니다. 현재 ${okdongSet.length}대입니다.');
+    }
+    if (reserveCount != 1) {
+      warnings.add('금일 옥동 예비 차량 수가 1대가 아닙니다. 현재 ${reserveCount}대입니다.');
+    }
+    if (tomorrowAssignments.isNotEmpty && unassignedTomorrowSlots.isNotEmpty) {
+      warnings.add('미배정 슬롯: ${unassignedTomorrowSlots.join(', ')}');
+    }
+    final reviewCount = trains.where(_trainNeedsReview).length;
+    if (reviewCount > 0) {
+      warnings.add('확인 필요 차량: ${reviewCount}대');
+    }
+    return warnings;
+  }
+
+  Widget _buildAssignmentPanel() {
+    final sorted = [...tomorrowAssignments]..sort((a, b) => a.slot.compareTo(b.slot));
+    return Container(
+      color: Colors.grey.shade100,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    '명일 배정 결과',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                Text(
+                  '${sorted.length}개',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: sorted.isEmpty
+                ? const Center(
+                    child: Text(
+                      '아직 생성된 배정이 없습니다.',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                    ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                    itemCount: sorted.length,
+                    itemBuilder: (_, i) {
+                      final a = sorted[i];
+                      return Card(
+                        margin: const EdgeInsets.symmetric(vertical: 4),
+                        child: ListTile(
+                          title: Text(
+                            '${a.slot}번 / ${a.trainId} / ${TimeParser.format(a.departureMins)}',
+                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                          ),
+                          subtitle: Text(
+                            '${a.lane} ${a.note}'.trim(),
+                            style: const TextStyle(fontSize: 15),
+                          ),
+                          trailing: a.reason.isEmpty
+                              ? null
+                              : Chip(
+                                  label: Text(
+                                    a.reason,
+                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                                  ),
+                                ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildDoubleParkingSimulator() {
