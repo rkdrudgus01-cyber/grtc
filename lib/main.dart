@@ -1,2774 +1,3184 @@
+﻿import 'dart:async';
+import 'dart:convert';
 import 'dart:html' as html;
 import 'dart:typed_data';
-import 'dart:convert';
 
-import 'package:archive/archive.dart';
+import 'package:excel/excel.dart' as ex;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:xml/xml.dart';
 
-void main() => runApp(const GRTCApp());
+const bool kDeveloperBuild =
+    bool.fromEnvironment('DEVELOPER_BUILD', defaultValue: false);
+const double kStopSpeedThreshold = 0.5;
+const double kMoveSpeedThreshold = 5.0;
+const double kPbActiveThreshold = 0.1;
+const int kDoorCloseDelaySec = 3;
+const int kControlPendingWarnSec = 3;
+const int kDepartureConfirmSec = 5;
+const int kSignalDebounceSec = 2;
+const int kFsbrSustainSec = 2;
+const int kNoCodeFsbrMinSec = 2;
+const int kNoCodeNoFsbrWarnSec = 4;
+const int kNoCodeNoFsbrSummaryEverySec = 30;
+const int kNoCodeCriticalSec = 120;
+const int kInhibitWarnSec = 10;
+const int kRecentModeChangeSec = 10;
+const int kRecentFsbrExplainedSec = 8;
+const int kD15CooldownSec = 15;
+const int kModeUnsetWarnSec = 5;
+const int kDepartureFailureWarnSec = 5;
 
-enum TrainStatus {
-  maintenance,
-  outOfService,
-  research,
-  longDia,
-  mediumDia,
-  shortDia,
-  oneLoop,
-  night7D,
-  morning7D,
-  afternoon7D,
-  cleaning,
-  okdongStay,
-  okdongReserve,
-  tomorrowReserve,
+void main() {
+  runApp(const LogAnalyzerApp());
 }
 
-enum ViewMode {
-  dial,
-  doubleParking,
-}
-
-enum GenerationMode {
-  quickManual,
-  autoRestore,
-}
-
-enum TrainListFilter {
-  all,
-  needsReview,
-  okdongOnly,
-}
-
-const Map<TrainStatus, String> kStatusLabel = {
-  TrainStatus.maintenance: '중정비',
-  TrainStatus.outOfService: '운휴',
-  TrainStatus.research: '기술연구',
-  TrainStatus.longDia: '장다이아 유도',
-  TrainStatus.mediumDia: '중다이아 유도',
-  TrainStatus.shortDia: '단다이아 유도',
-  TrainStatus.oneLoop: '1회 운행',
-  TrainStatus.night7D: '야간 7D',
-  TrainStatus.morning7D: '오전 7D',
-  TrainStatus.afternoon7D: '오후 7D',
-  TrainStatus.cleaning: '대청소',
-  TrainStatus.okdongStay: '금일 옥동 주박',
-  TrainStatus.okdongReserve: '금일 옥동 예비',
-  TrainStatus.tomorrowReserve: '명일 옥동 예비',
-};
-
-const double kChipFontSize = 17;
-
-String statusLabel(TrainStatus status) => kStatusLabel[status] ?? '미지정';
-
-T? firstOrNull<T>(Iterable<T> values) {
-  final iterator = values.iterator;
-  return iterator.moveNext() ? iterator.current : null;
-}
-
-enum WarningSeverity {
-  blocking,
-  advisory,
-}
-
-class DialWarning {
-  final WarningSeverity severity;
-  final String message;
-
-  const DialWarning({
-    required this.severity,
-    required this.message,
-  });
-}
-
-class Train {
-  final String id;
-  final Set<TrainStatus> statuses;
-  final double mileage;
-  final int departureMins;
-
-  const Train({
-    required this.id,
-    this.statuses = const {},
-    this.mileage = 0,
-    this.departureMins = TimeParser.unknown,
-  });
-
-  bool has(TrainStatus status) => statuses.contains(status);
-
-  Train copyWith({
-    Set<TrainStatus>? statuses,
-    double? mileage,
-    int? departureMins,
-  }) {
-    return Train(
-      id: id,
-      statuses: statuses ?? this.statuses,
-      mileage: mileage ?? this.mileage,
-      departureMins: departureMins ?? this.departureMins,
-    );
-  }
-}
-
-class ParsedArrivalRow {
-  final String trainId;
-  final int arrivalMins;
-  final String lane;
-  final String inspection;
-  final String note;
-
-  const ParsedArrivalRow({
-    required this.trainId,
-    required this.arrivalMins,
-    required this.lane,
-    required this.inspection,
-    required this.note,
-  });
-}
-
-class ParsedDepartureRow {
-  final int slot;
-  final String trainId;
-  final int departureMins;
-  final String lane;
-  final String note;
-
-  const ParsedDepartureRow({
-    required this.slot,
-    required this.trainId,
-    required this.departureMins,
-    required this.lane,
-    required this.note,
-  });
-}
-
-class ParsedCompanyDial {
-  final Map<String, int> departures;
-  final List<ParsedDepartureRow> departureRows;
-  final List<ParsedArrivalRow> arrivals;
-  final String? okdongReserveFromG35;
-
-  const ParsedCompanyDial({
-    required this.departures,
-    required this.departureRows,
-    required this.arrivals,
-    required this.okdongReserveFromG35,
-  });
-}
-
-class TomorrowAssignment {
-  final int slot;
-  final String trainId;
-  final int departureMins;
-  final String lane;
-  final String note;
-  final String reason;
-
-  const TomorrowAssignment({
-    required this.slot,
-    required this.trainId,
-    required this.departureMins,
-    required this.lane,
-    required this.note,
-    this.reason = '',
-  });
-}
-
-class TomorrowDialGenerationResult {
-  final List<TomorrowAssignment> assignments;
-  final List<String> logs;
-  final List<int> unassignedSlots;
-
-  const TomorrowDialGenerationResult({
-    required this.assignments,
-    required this.logs,
-    required this.unassignedSlots,
-  });
-
-  int get length => assignments.length;
-}
-
-class GRTCApp extends StatelessWidget {
-  const GRTCApp({super.key});
+class LogAnalyzerApp extends StatelessWidget {
+  const LogAnalyzerApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'GRTC',
+      title: '광주도시철도 전동차 운행로그 분석기',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
         useMaterial3: true,
-        chipTheme: const ChipThemeData(
-          labelStyle:
-              TextStyle(fontSize: kChipFontSize, fontWeight: FontWeight.w700),
-          padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        ),
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0B6E4F)),
       ),
-      home: const MainScreen(),
+      home: const AnalyzerHomePage(),
     );
   }
 }
 
-class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
+class AnalyzerHomePage extends StatefulWidget {
+  const AnalyzerHomePage({super.key});
 
   @override
-  State<MainScreen> createState() => _MainScreenState();
+  State<AnalyzerHomePage> createState() => _AnalyzerHomePageState();
 }
 
-class _MainScreenState extends State<MainScreen> {
-  List<Train> trains = _initialTrains();
-  Uint8List? uploadedTodayDialBytes;
-  ParsedCompanyDial? parsedTodayDial;
-  Uint8List? uploadedTomorrowDialBytes;
-  ParsedCompanyDial? parsedTomorrowDial;
-  List<TomorrowAssignment> tomorrowAssignments = const [];
-  List<String> generationLogs = const [];
-  List<int> unassignedTomorrowSlots = const [];
-  Set<String> okdongForbidden = {};
-  ViewMode viewMode = ViewMode.dial;
-  GenerationMode generationMode = GenerationMode.autoRestore;
-  TrainListFilter trainListFilter = TrainListFilter.all;
-  String trainSearch = '';
-  String message = '오늘 다이얼 미업로드';
+class _AnalyzerHomePageState extends State<AnalyzerHomePage> {
+  final AnalyzerEngine _engine = AnalyzerEngine(
+    signalDefinitions: kSignalDefinitions,
+  );
 
-  static List<Train> _initialTrains() {
-    return List.generate(
-      23,
-      (i) => Train(id: '${101 + i}', mileage: 150000 + (i * 1000)),
-    );
+  List<LogRecord> _records = const <LogRecord>[];
+  List<DiagnosticFinding> _findings = const <DiagnosticFinding>[];
+  String _status = '운행기록 파일(.xlsx/.csv)을 업로드해 주세요.';
+  String _fileName = '';
+  int _rawRows = 0;
+  bool _isAnalyzing = false;
+  EntryType? _filterType;
+
+  List<DiagnosticFinding> get _visibleFindings {
+    if (_filterType == null) {
+      return _findings;
+    }
+    return _findings
+        .where((f) => f.type == _filterType)
+        .toList(growable: false);
   }
 
-  Uint8List _toBytes(Object? result) {
-    if (result == null) {
-      throw Exception('파일을 읽지 못했습니다.');
-    }
-    if (result is Uint8List) {
-      return Uint8List.fromList(result);
-    }
-    if (result is ByteBuffer) {
-      return Uint8List.view(result);
-    }
-    throw Exception('지원하지 않는 파일 결과 타입: ${result.runtimeType}');
-  }
-
-  void _uploadTodayDial() {
-    final input = html.FileUploadInputElement()..accept = '.xlsx';
-
-    input.onChange.listen((event) {
-      if (input.files == null || input.files!.isEmpty) return;
-
-      final file = input.files!.first;
-      final reader = html.FileReader();
-      reader.readAsArrayBuffer(file);
-
-      reader.onLoadEnd.listen((event) {
-        try {
-          final bytes = _toBytes(reader.result);
-          final parsed = CompanyDialParser.parse(bytes);
-
-          setState(() {
-            uploadedTodayDialBytes = bytes;
-            parsedTodayDial = parsed;
-            uploadedTomorrowDialBytes = null;
-            parsedTomorrowDial = null;
-            trains = TrainAutoMapper.applyTodayInfoBulk(trains, parsed);
-            okdongForbidden = {
-              for (final t in trains)
-                if (t.has(TrainStatus.outOfService) ||
-                    t.has(TrainStatus.maintenance) ||
-                    t.has(TrainStatus.research))
-                  t.id,
-            };
-            tomorrowAssignments = const [];
-            generationLogs = const [];
-            unassignedTomorrowSlots = const [];
-            message =
-                '금일 업로드 완료 / 출고 ${parsed.departures.length}건 / 입고 ${parsed.arrivals.length}건 / 자동복원 완료';
-          });
-        } catch (e) {
-          setState(() {
-            message = '금일 업로드 오류: $e';
-          });
-        }
-      });
-    });
-
+  Future<void> _pickAndAnalyzeFile() async {
+    final input = html.FileUploadInputElement()..accept = '.xlsx,.csv,.xls';
     input.click();
+    await input.onChange.first;
+    if (input.files == null || input.files!.isEmpty) {
+      return;
+    }
+    final file = input.files!.first;
+    await _handleFile(file);
   }
 
-  void _uploadTomorrowDial() {
-    final input = html.FileUploadInputElement()..accept = '.xlsx';
-
-    input.onChange.listen((event) {
-      if (input.files == null || input.files!.isEmpty) return;
-
-      final file = input.files!.first;
-      final reader = html.FileReader();
-      reader.readAsArrayBuffer(file);
-
-      reader.onLoadEnd.listen((event) {
-        try {
-          final bytes = _toBytes(reader.result);
-          final parsed = CompanyDialParser.parse(bytes);
-          setState(() {
-            uploadedTomorrowDialBytes = bytes;
-            parsedTomorrowDial = parsed;
-            message =
-                '명일 업로드 완료 / 출고 ${parsed.departures.length}건 / 입고 ${parsed.arrivals.length}건';
-          });
-        } catch (e) {
-          setState(() {
-            message = '명일 업로드 오류: $e';
-          });
-        }
+  Future<void> _handleFile(html.File file) async {
+    final ext = _fileExtension(file.name);
+    if (ext == '.xls') {
+      setState(() {
+        _status = '.xls 형식은 지원하지 않습니다. .xlsx 또는 .csv를 사용해 주세요.';
+        _fileName = file.name;
       });
+      return;
+    }
+
+    if (ext != '.xlsx' && ext != '.csv') {
+      setState(() {
+        _status = '지원하지 않는 파일 형식입니다: ${file.name}';
+        _fileName = file.name;
+      });
+      return;
+    }
+
+    setState(() {
+      _isAnalyzing = true;
+      _status = '파일을 읽고 분석을 준비하고 있습니다...';
+      _fileName = file.name;
+      _records = const <LogRecord>[];
+      _findings = const <DiagnosticFinding>[];
+      _rawRows = 0;
     });
 
-    input.click();
-  }
-
-  void _toggleStatus(String id, TrainStatus status) {
-    setState(() {
-      trains = trains.map((t) {
-        if (t.id != id) return t;
-
-        final next = {...t.statuses};
-        if (next.contains(status)) {
-          next.remove(status);
-        } else {
-          next.add(status);
-        }
-
-        if (_blocksOkdong(status)) {
-          if (next.contains(status)) {
-            okdongForbidden.add(id);
-          } else {
-            final stillBlocked = next.any(_blocksOkdong);
-            if (!stillBlocked) okdongForbidden.remove(id);
-          }
-        }
-
-        return t.copyWith(statuses: next);
-      }).toList();
-      tomorrowAssignments = const [];
-      generationLogs = const [];
-      unassignedTomorrowSlots = const [];
-    });
-  }
-
-  bool _blocksOkdong(TrainStatus status) {
-    return status == TrainStatus.outOfService ||
-        status == TrainStatus.maintenance ||
-        status == TrainStatus.research;
-  }
-
-  void _toggleOkdongForbidden(String id) {
-    setState(() {
-      if (okdongForbidden.contains(id)) {
-        okdongForbidden.remove(id);
-      } else {
-        okdongForbidden.add(id);
+    try {
+      final bytes = await _readFileAsBytes(file);
+      if (mounted) {
+        setState(() {
+          _status = '데이터 파싱 중...';
+        });
       }
-      tomorrowAssignments = const [];
-      generationLogs = const [];
-      unassignedTomorrowSlots = const [];
-    });
-  }
+      await Future<void>.delayed(Duration.zero);
 
-  List<String> _blockingIssuesForGeneration() {
-    return _collectDialWarnings()
-        .where((w) => w.severity == WarningSeverity.blocking)
-        .map((w) => w.message)
-        .toList();
-  }
+      final rawRows =
+          ext == '.csv' ? parseCsvRows(bytes) : parseXlsxRows(bytes);
 
-  void _generateTomorrowDial() {
-    final blocking = _blockingIssuesForGeneration();
-    if (blocking.isNotEmpty) {
-      setState(() => message = '생성 중단: ${blocking.join(' / ')}');
-      return;
-    }
+      if (mounted) {
+        setState(() {
+          _status = '레코드 변환 중...';
+        });
+      }
+      await Future<void>.delayed(Duration.zero);
+      final parsed = _engine.parseRowsToRecords(rawRows);
 
-    final effectiveDial = parsedTodayDial ?? _buildQuickModeTemplate();
-    if (effectiveDial == null) {
-      setState(() => message = '오늘 다이얼을 먼저 업로드하세요.');
-      return;
-    }
+      if (mounted) {
+        setState(() {
+          _status = '신호 정규화 중...';
+        });
+      }
+      await Future<void>.delayed(Duration.zero);
+      final normalized = _engine.normalizeSignals(parsed);
 
-    final generated = TomorrowDialEngine.generateDetailed(
-      trains: trains,
-      todayDial: effectiveDial,
-      okdongForbidden: okdongForbidden,
-    );
-    final modeText =
-        generationMode == GenerationMode.quickManual ? '빠른 생성' : '자동 복원 생성';
-    final unassignedSuffix = generated.unassignedSlots.isEmpty
-        ? ''
-        : ' / 미배정 ${generated.unassignedSlots.join(', ')}';
-    setState(() {
-      tomorrowAssignments = generated.assignments;
-      generationLogs = generated.logs;
-      unassignedTomorrowSlots = generated.unassignedSlots;
-      message = '$modeText 완료 / ${generated.length}개 슬롯 배정$unassignedSuffix';
-    });
+      if (mounted) {
+        setState(() {
+          _status = '이벤트/진단 분석 중...';
+        });
+      }
+      await Future<void>.delayed(Duration.zero);
+      final findings = _engine.analyze(normalized);
 
-    for (final log in generated.logs) {
-      debugPrint('[TomorrowDial] $log');
-    }
-  }
-
-  ParsedCompanyDial? _buildQuickModeTemplate() {
-    if (generationMode != GenerationMode.quickManual) return null;
-
-    const okdongLanes = <int, String>{
-      14: '옥동1',
-      15: '옥동2',
-      16: '옥동3',
-      17: '옥동4',
-      18: '옥동예비',
-    };
-
-    final rows = List<ParsedDepartureRow>.generate(18, (index) {
-      final slot = index + 1;
-      return ParsedDepartureRow(
-        slot: slot,
-        trainId: '',
-        departureMins: TimeParser.unknown,
-        lane: okdongLanes[slot] ?? '용산',
-        note: '',
-      );
-    });
-
-    return ParsedCompanyDial(
-      departures: const {},
-      departureRows: rows,
-      arrivals: const [],
-      okdongReserveFromG35: null,
-    );
-  }
-
-  Future<void> _saveCompanyExcel() async {
-    if (tomorrowAssignments.isEmpty) {
-      _generateTomorrowDial();
-    }
-    if (tomorrowAssignments.isEmpty) {
-      setState(() => message = '저장 중단: 먼저 명일 다이얼을 생성해 주세요.');
-      return;
-    }
-
-    final templateBytes = await _resolveTemplateBytesForSave();
-    if (templateBytes == null) {
-      setState(() => message = '저장 실패: 템플릿을 찾지 못했습니다. 오늘 다이얼을 업로드해 주세요.');
-      return;
-    }
-
-    try {
-      final parkingResult =
-          parsedTodayDial == null || parsedTomorrowDial == null
-              ? null
-              : DoubleParkingEngine.simulate(
-                  todayDial: parsedTodayDial!,
-                  tomorrowDial: parsedTomorrowDial!,
-                );
-      final bytes = CompanyExcelWriter.write(
-        templateBytes: templateBytes,
-        assignments: tomorrowAssignments,
-        doubleParkingResult: parkingResult,
-      );
-      final blob = html.Blob([bytes],
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      final url = html.Url.createObjectUrlFromBlob(blob);
-      html.AnchorElement(href: url)
-        ..download = '명일입출고계획.xlsx'
-        ..click();
-      html.Url.revokeObjectUrl(url);
-
-      setState(() => message = parkingResult == null
-          ? '회사 엑셀 양식 저장 완료'
-          : '회사 엑셀 양식 저장 완료 / 이중주차 결과 포함');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _records = normalized;
+        _findings = findings;
+        _rawRows = rawRows.length;
+        _status =
+            '분석 완료: 레코드 ${normalized.length}건, 진단 ${findings.length}건 (${file.name})';
+      });
     } catch (e) {
-      setState(() => message = '엑셀 저장 오류: $e');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _status = '분석 실패: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isAnalyzing = false;
+        });
+      }
     }
   }
 
-  Future<Uint8List> _loadBundledTemplateBytes() async {
-    final data =
-        await rootBundle.load('assets/templates/company_blank_template.xlsx');
-    return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
-  }
-
-  Future<Uint8List?> _resolveTemplateBytesForSave() async {
-    if (uploadedTodayDialBytes != null) {
-      return uploadedTodayDialBytes!;
-    }
-    try {
-      return await _loadBundledTemplateBytes();
-    } catch (_) {
-      return null;
-    }
-  }
-
-  void _resetAll() {
+  void _clearResult() {
     setState(() {
-      trains = _initialTrains();
-      uploadedTodayDialBytes = null;
-      parsedTodayDial = null;
-      uploadedTomorrowDialBytes = null;
-      parsedTomorrowDial = null;
-      tomorrowAssignments = const [];
-      generationLogs = const [];
-      unassignedTomorrowSlots = const [];
-      okdongForbidden.clear();
-      viewMode = ViewMode.dial;
-      generationMode = GenerationMode.autoRestore;
-      trainListFilter = TrainListFilter.all;
-      trainSearch = '';
-      message = '전체 초기화 완료';
+      _records = const <LogRecord>[];
+      _findings = const <DiagnosticFinding>[];
+      _status = '운행기록 파일(.xlsx/.csv)을 업로드해 주세요.';
+      _fileName = '';
+      _rawRows = 0;
+      _filterType = null;
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final counts = _countByType(_findings);
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('GRTC 명일 다이얼 자동 생성기'),
-        actions: [
-          FilledButton(
-            onPressed: _uploadTodayDial,
-            child: const Text('오늘 다이얼 업로드', style: TextStyle(fontSize: 16)),
-          ),
-          const SizedBox(width: 8),
-          FilledButton(
-            onPressed: _uploadTomorrowDial,
-            child: const Text('명일 다이얼 업로드', style: TextStyle(fontSize: 16)),
-          ),
-          const SizedBox(width: 8),
-          FilledButton.tonal(
-            onPressed: _generateTomorrowDial,
-            child: const Text('명일 다이얼 생성', style: TextStyle(fontSize: 16)),
-          ),
-          const SizedBox(width: 8),
-          FilledButton.tonal(
-            onPressed: _saveCompanyExcel,
-            child: const Text('회사 엑셀 저장', style: TextStyle(fontSize: 16)),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            onPressed: _resetAll,
-            icon: const Icon(Icons.refresh),
-            tooltip: '전체 초기화',
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: Column(
-        children: [
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(14),
-            color: Colors.amber.shade50,
-            child: Text(
-              message,
-              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
-            ),
-          ),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: SegmentedButton<ViewMode>(
-              segments: const [
-                ButtonSegment(value: ViewMode.dial, label: Text('다이얼 관리')),
-                ButtonSegment(
-                    value: ViewMode.doubleParking, label: Text('이중주차 시뮬레이터')),
-              ],
-              selected: {viewMode},
-              onSelectionChanged: (selected) {
-                setState(() {
-                  viewMode = selected.first;
-                });
-              },
-            ),
-          ),
-          if (viewMode == ViewMode.dial)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: SegmentedButton<GenerationMode>(
-                segments: const [
-                  ButtonSegment(
-                    value: GenerationMode.quickManual,
-                    label: Text('빠른 생성'),
-                  ),
-                  ButtonSegment(
-                    value: GenerationMode.autoRestore,
-                    label: Text('자동 복원 생성'),
-                  ),
-                ],
-                selected: {generationMode},
-                onSelectionChanged: (selected) {
-                  setState(() {
-                    generationMode = selected.first;
-                  });
-                },
-              ),
-            ),
-          if (viewMode == ViewMode.dial) _buildWarningPanel(),
-          if (viewMode == ViewMode.dial) _buildNeedsReviewPanel(),
-          if (viewMode == ViewMode.dial) _buildGenerationLogPanel(),
-          Expanded(
-            child: viewMode == ViewMode.dial
-                ? Row(
-                    children: [
-                      Expanded(flex: 3, child: _buildStatusPanel()),
-                      Expanded(flex: 5, child: _buildTrainListV2()),
-                      Expanded(flex: 4, child: _buildAssignmentPanel()),
-                    ],
-                  )
-                : _buildDoubleParkingSimulator(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatusPanel() {
-    final groups = <String, List<TrainStatus>>{
-      '운영 제외': [
-        TrainStatus.outOfService,
-        TrainStatus.maintenance,
-        TrainStatus.research,
-      ],
-      '다이아 / 운행': [
-        TrainStatus.longDia,
-        TrainStatus.mediumDia,
-        TrainStatus.shortDia,
-        TrainStatus.oneLoop,
-      ],
-      '특수 작업': [
-        TrainStatus.night7D,
-        TrainStatus.morning7D,
-        TrainStatus.afternoon7D,
-        TrainStatus.cleaning,
-      ],
-      '옥동 상태': [
-        TrainStatus.okdongStay,
-        TrainStatus.okdongReserve,
-        TrainStatus.tomorrowReserve,
-      ],
-    };
-
-    return Container(
-      color: Colors.indigo.shade50,
-      child: ListView(
-        padding: const EdgeInsets.all(12),
-        children: groups.entries.map((entry) {
-          return Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    entry.key,
-                    style: const TextStyle(
-                        fontSize: 20, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: entry.value.map((s) {
-                      return Chip(label: Text(statusLabel(s)));
-                    }).toList(),
-                  ),
-                ],
-              ),
-            ),
-          );
-        }).toList(),
-      ),
-    );
-  }
-
-  // ignore: unused_element
-  Widget _buildTrainList() {
-    return ListView.builder(
-      padding: const EdgeInsets.all(12),
-      itemCount: trains.length,
-      itemBuilder: (_, i) {
-        final train = trains[i];
-        final forbidden = okdongForbidden.contains(train.id);
-        return Card(
-          margin: const EdgeInsets.symmetric(vertical: 6),
-          child: ExpansionTile(
-            leading: CircleAvatar(
-              radius: 24,
-              backgroundColor: forbidden ? Colors.red : Colors.blue,
+        elevation: 0,
+        backgroundColor: const Color(0xFF0E4F46),
+        foregroundColor: Colors.white,
+        title: const Text('광주도시철도 전동차 운행로그 분석기 v5.0'),
+        actions: const <Widget>[
+          Padding(
+            padding: EdgeInsets.only(right: 16),
+            child: Center(
               child: Text(
-                train.id,
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold),
+                '제작자: 강경현',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
               ),
             ),
-            title: Text(
-              '${train.id} / 출고 ${TimeParser.format(train.departureMins)}',
-              style: const TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
-            ),
-            subtitle: Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Wrap(
+          ),
+        ],
+      ),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: <Color>[Color(0xFFF4FAF7), Color(0xFFEAF3EF)],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Card(
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  side: BorderSide(color: scheme.primary.withOpacity(0.18)),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        _status,
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 8,
+                        children: <Widget>[
+                          _infoChip(
+                            icon: Icons.description_outlined,
+                            text: '파일: ${_fileName.isEmpty ? "-" : _fileName}',
+                          ),
+                          _infoChip(
+                            icon: Icons.table_rows_outlined,
+                            text: '원시행: $_rawRows',
+                          ),
+                          _infoChip(
+                            icon: Icons.dataset_outlined,
+                            text: '레코드: ${_records.length}',
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
                 spacing: 8,
                 runSpacing: 8,
-                children: train.statuses.map((s) {
-                  return InputChip(
-                    label: Text(statusLabel(s)),
-                    onDeleted: () => _toggleStatus(train.id, s),
-                  );
-                }).toList(),
-              ),
-            ),
-            trailing: SizedBox(
-              width: 128,
-              child: forbidden
-                  ? FilledButton(
-                      onPressed: () => _toggleOkdongForbidden(train.id),
-                      style:
-                          FilledButton.styleFrom(backgroundColor: Colors.red),
-                      child: const Text('옥동금지',
-                          style: TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.bold)),
-                    )
-                  : OutlinedButton(
-                      onPressed: () => _toggleOkdongForbidden(train.id),
-                      child: const Text('옥동허용',
-                          style: TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.bold)),
-                    ),
-            ),
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: TrainStatus.values.map((s) {
-                    final active = train.statuses.contains(s);
-                    return FilterChip(
-                      selected: active,
-                      onSelected: (_) => _toggleStatus(train.id, s),
-                      label: Text(statusLabel(s)),
-                    );
-                  }).toList(),
-                ),
-              ),
-              if (tomorrowAssignments.any((a) => a.trainId == train.id))
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      _tomorrowSummary(train.id),
-                      style: const TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.w700),
-                    ),
+                children: <Widget>[
+                  FilledButton.icon(
+                    onPressed: _isAnalyzing ? null : _pickAndAnalyzeFile,
+                    icon: const Icon(Icons.upload_file),
+                    label: const Text('파일 업로드'),
                   ),
-                ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  String _tomorrowSummary(String trainId) {
-    final assigned =
-        tomorrowAssignments.where((a) => a.trainId == trainId).toList();
-    return assigned
-        .map((a) =>
-            '명일 ${a.slot}번 ${a.lane} ${TimeParser.format(a.departureMins)} ${a.note}'
-                .trim())
-        .join(' / ');
-  }
-
-  Widget _buildTrainListV2() {
-    final visibleTrains = _visibleTrainsV2();
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
-          child: TextField(
-            onChanged: (value) {
-              setState(() {
-                trainSearch = value.trim();
-              });
-            },
-            decoration: const InputDecoration(
-              isDense: true,
-              border: OutlineInputBorder(),
-              prefixIcon: Icon(Icons.search),
-              hintText: '편성 검색',
-            ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-          child: SegmentedButton<TrainListFilter>(
-            segments: const [
-              ButtonSegment(
-                value: TrainListFilter.all,
-                label: Text('전체'),
-              ),
-              ButtonSegment(
-                value: TrainListFilter.needsReview,
-                label: Text('확인 필요'),
-              ),
-              ButtonSegment(
-                value: TrainListFilter.okdongOnly,
-                label: Text('옥동'),
-              ),
-            ],
-            selected: {trainListFilter},
-            onSelectionChanged: (selected) {
-              setState(() {
-                trainListFilter = selected.first;
-              });
-            },
-          ),
-        ),
-        Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.all(12),
-            itemCount: visibleTrains.length,
-            itemBuilder: (_, i) {
-              final train = visibleTrains[i];
-              final forbidden = okdongForbidden.contains(train.id);
-              final reviewReasons = _reviewReasons(train);
-
-              return Card(
-                margin: const EdgeInsets.symmetric(vertical: 6),
-                child: ExpansionTile(
-                  leading: CircleAvatar(
-                    radius: 24,
-                    backgroundColor: forbidden ? Colors.red : Colors.blue,
-                    child: Text(
-                      train.id,
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold),
-                    ),
+                  OutlinedButton.icon(
+                    onPressed: _isAnalyzing ? null : _clearResult,
+                    icon: const Icon(Icons.delete_outline),
+                    label: const Text('초기화'),
                   ),
-                  title: Text(
-                    '${train.id} / 출고 ${TimeParser.format(train.departureMins)}',
-                    style: const TextStyle(
-                        fontSize: 21, fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: train.statuses.map((s) {
-                            return InputChip(
-                              label: Text(statusLabel(s)),
-                              onDeleted: () => _toggleStatus(train.id, s),
-                            );
-                          }).toList(),
-                        ),
-                        if (reviewReasons.isNotEmpty) const SizedBox(height: 8),
-                        if (reviewReasons.isNotEmpty)
-                          Text(
-                            '확인 필요: ${reviewReasons.join(' / ')}',
-                            style: const TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                              color: Colors.deepOrange,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                  trailing: SizedBox(
-                    width: 128,
-                    child: forbidden
-                        ? FilledButton(
-                            onPressed: () => _toggleOkdongForbidden(train.id),
-                            style: FilledButton.styleFrom(
-                                backgroundColor: Colors.red),
-                            child: const Text('옥동금지',
-                                style: TextStyle(
-                                    fontSize: 16, fontWeight: FontWeight.bold)),
-                          )
-                        : OutlinedButton(
-                            onPressed: () => _toggleOkdongForbidden(train.id),
-                            child: const Text('옥동허용',
-                                style: TextStyle(
-                                    fontSize: 16, fontWeight: FontWeight.bold)),
-                          ),
-                  ),
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: TrainStatus.values.map((s) {
-                          final active = train.statuses.contains(s);
-                          return FilterChip(
-                            selected: active,
-                            onSelected: (_) => _toggleStatus(train.id, s),
-                            label: Text(statusLabel(s)),
-                          );
-                        }).toList(),
-                      ),
-                    ),
-                    if (tomorrowAssignments.any((a) => a.trainId == train.id))
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            _tomorrowSummaryWithReason(train.id),
-                            style: const TextStyle(
-                                fontSize: 18, fontWeight: FontWeight.w700),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-
-  List<Train> _visibleTrainsV2() {
-    final query = trainSearch.trim();
-    final filtered = trains.where((train) {
-      if (query.isNotEmpty && !train.id.contains(query)) return false;
-      switch (trainListFilter) {
-        case TrainListFilter.all:
-          return true;
-        case TrainListFilter.needsReview:
-          return _trainNeedsReview(train);
-        case TrainListFilter.okdongOnly:
-          return train.has(TrainStatus.okdongStay) ||
-              train.has(TrainStatus.okdongReserve);
-      }
-    }).toList();
-    filtered.sort((a, b) =>
-        (int.tryParse(a.id) ?? 9999).compareTo(int.tryParse(b.id) ?? 9999));
-    return filtered;
-  }
-
-  bool _trainNeedsReview(Train train) => _reviewReasons(train).isNotEmpty;
-
-  List<String> _reviewReasons(Train train) {
-    final reasons = <String>[];
-
-    final hasExcluded = train.has(TrainStatus.outOfService) ||
-        train.has(TrainStatus.maintenance) ||
-        train.has(TrainStatus.research);
-    final hasRunLike = train.has(TrainStatus.longDia) ||
-        train.has(TrainStatus.mediumDia) ||
-        train.has(TrainStatus.shortDia) ||
-        train.has(TrainStatus.oneLoop) ||
-        train.has(TrainStatus.night7D) ||
-        train.has(TrainStatus.morning7D) ||
-        train.has(TrainStatus.afternoon7D);
-    if (hasExcluded && hasRunLike) {
-      reasons.add('운영 제외와 운행 상태 동시 지정');
-    }
-
-    final sevenDCount = [
-      TrainStatus.night7D,
-      TrainStatus.morning7D,
-      TrainStatus.afternoon7D,
-    ].where((s) => train.has(s)).length;
-    if (sevenDCount > 1) {
-      reasons.add('7D 복수 지정');
-    }
-
-    final hasOkdongStatus = train.has(TrainStatus.okdongStay) ||
-        train.has(TrainStatus.okdongReserve) ||
-        train.has(TrainStatus.tomorrowReserve);
-    if (okdongForbidden.contains(train.id) && hasOkdongStatus) {
-      reasons.add('옥동금지와 옥동상태 충돌');
-    }
-
-    return reasons;
-  }
-
-  String _tomorrowSummaryWithReason(String trainId) {
-    final assigned =
-        tomorrowAssignments.where((a) => a.trainId == trainId).toList();
-    return assigned.map((a) {
-      final reason = a.reason.isEmpty ? '' : ' [${a.reason}]';
-      return '명일 ${a.slot}번 ${a.lane} ${TimeParser.format(a.departureMins)} ${a.note}$reason'
-          .trim();
-    }).join(' / ');
-  }
-
-  Widget _buildNeedsReviewPanel() {
-    final targets = trains.where(_trainNeedsReview).toList()
-      ..sort((a, b) =>
-          (int.tryParse(a.id) ?? 9999).compareTo(int.tryParse(b.id) ?? 9999));
-    if (targets.isEmpty) return const SizedBox.shrink();
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-      child: Card(
-        color: Colors.orange.shade50,
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: targets.take(8).map((train) {
-              final reason = _reviewReasons(train).join(', ');
-              return Chip(
-                label: Text('${train.id}: $reason'),
-              );
-            }).toList(),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildWarningPanel() {
-    final warnings = _collectDialWarnings();
-    if (warnings.isEmpty) return const SizedBox.shrink();
-    final blocking =
-        warnings.where((w) => w.severity == WarningSeverity.blocking).toList();
-    final advisory =
-        warnings.where((w) => w.severity == WarningSeverity.advisory).toList();
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-      child: Column(
-        children: [
-          if (blocking.isNotEmpty)
-            Card(
-              color: Colors.red.shade50,
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(
-                  blocking.map((w) => '중단 경고: ${w.message}').join('\n'),
-                  style: const TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w700),
-                ),
+                  _buildTypeFilterDropdown(),
+                ],
               ),
-            ),
-          if (blocking.isNotEmpty && advisory.isNotEmpty)
-            const SizedBox(height: 6),
-          if (advisory.isNotEmpty)
-            Card(
-              color: Colors.amber.shade50,
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(
-                  advisory.map((w) => '점검 권장: ${w.message}').join('\n'),
-                  style: const TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w700),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  List<DialWarning> _collectDialWarnings() {
-    final warnings = <DialWarning>[];
-    if (generationMode == GenerationMode.autoRestore &&
-        parsedTodayDial == null) {
-      warnings.add(
-        const DialWarning(
-          severity: WarningSeverity.blocking,
-          message: '자동 복원 생성은 오늘 다이얼 업로드가 필요합니다.',
-        ),
-      );
-    }
-
-    final okdongSet = <String>{
-      for (final t in trains)
-        if (t.has(TrainStatus.okdongStay) || t.has(TrainStatus.okdongReserve))
-          t.id,
-    };
-    final reserveCount =
-        trains.where((t) => t.has(TrainStatus.okdongReserve)).length;
-    if (okdongSet.length != 5) {
-      warnings.add(
-        DialWarning(
-          severity: WarningSeverity.blocking,
-          message: '옥동 주박군이 5대가 아닙니다. 현재 ${okdongSet.length}대입니다.',
-        ),
-      );
-    }
-    if (reserveCount != 1) {
-      warnings.add(
-        DialWarning(
-          severity: WarningSeverity.blocking,
-          message: '금일 옥동 예비 차량 수가 1대가 아닙니다. 현재 ${reserveCount}대입니다.',
-        ),
-      );
-    }
-    if (tomorrowAssignments.isNotEmpty && unassignedTomorrowSlots.isNotEmpty) {
-      warnings.add(
-        DialWarning(
-          severity: WarningSeverity.advisory,
-          message: '미배정 슬롯: ${unassignedTomorrowSlots.join(', ')}',
-        ),
-      );
-    }
-    final reviewCount = trains.where(_trainNeedsReview).length;
-    if (reviewCount > 0) {
-      warnings.add(
-        DialWarning(
-          severity: WarningSeverity.advisory,
-          message: '확인 필요 차량: ${reviewCount}대',
-        ),
-      );
-    }
-    if (parsedTodayDial != null) {
-      final turnbackWarnings = TomorrowDialEngine.evaluateTurnbackGaps(
-        parsedTodayDial!.departureRows.take(18).toList(),
-      );
-      for (final warning in turnbackWarnings) {
-        warnings.add(
-          DialWarning(
-            severity: WarningSeverity.advisory,
-            message: warning,
-          ),
-        );
-      }
-    }
-    return warnings;
-  }
-
-  Widget _buildGenerationLogPanel() {
-    if (generationLogs.isEmpty) return const SizedBox.shrink();
-    final preview = generationLogs.length <= 10
-        ? generationLogs
-        : generationLogs.sublist(generationLogs.length - 10);
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-      child: Card(
-        color: Colors.blueGrey.shade50,
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '배정 로그 (${generationLogs.length}건)',
-                style:
-                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                preview.join('\n'),
-                style:
-                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAssignmentPanel() {
-    final sorted = [...tomorrowAssignments]
-      ..sort((a, b) => a.slot.compareTo(b.slot));
-    return Container(
-      color: Colors.grey.shade100,
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    '명일 배정 결과',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              const SizedBox(height: 10),
+              _buildBadges(counts, scheme),
+              const SizedBox(height: 10),
+              Expanded(
+                child: Card(
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    side: BorderSide(color: Colors.black.withOpacity(0.08)),
                   ),
-                ),
-                Text(
-                  '${sorted.length}개',
-                  style: const TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w700),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: sorted.isEmpty
-                ? const Center(
-                    child: Text(
-                      '아직 생성된 배정이 없습니다.',
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                    ),
-                  )
-                : ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                    itemCount: sorted.length,
-                    itemBuilder: (_, i) {
-                      final a = sorted[i];
-                      return Card(
-                        margin: const EdgeInsets.symmetric(vertical: 4),
-                        child: ListTile(
-                          title: Text(
-                            '${a.slot}번 / ${a.trainId} / ${TimeParser.format(a.departureMins)}',
-                            style: const TextStyle(
-                                fontSize: 17, fontWeight: FontWeight.w700),
-                          ),
-                          subtitle: Text(
-                            '${a.lane} ${a.note}'.trim(),
-                            style: const TextStyle(fontSize: 15),
-                          ),
-                          trailing: a.reason.isEmpty
-                              ? null
-                              : Chip(
-                                  label: Text(
-                                    a.reason,
-                                    style: const TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w700),
-                                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: _isAnalyzing
+                        ? const Center(child: CircularProgressIndicator())
+                        : _visibleFindings.isEmpty
+                            ? const Center(
+                                child: Text(
+                                  '표시할 진단 로그가 없습니다. 파일을 업로드해 주세요.',
+                                  style: TextStyle(fontSize: 15),
                                 ),
-                        ),
-                      );
-                    },
+                              )
+                            : ListView.builder(
+                                itemCount: _visibleFindings.length,
+                                itemBuilder: (BuildContext context, int index) {
+                                  final finding = _visibleFindings[index];
+                                  final color =
+                                      entryTypeColor(finding.type, scheme);
+                                  final bg = color.withOpacity(0.10);
+
+                                  return Container(
+                                    margin: const EdgeInsets.only(bottom: 8),
+                                    decoration: BoxDecoration(
+                                      color: bg,
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border(
+                                        left: BorderSide(color: color, width: 4),
+                                      ),
+                                    ),
+                                    child: ExpansionTile(
+                                      tilePadding: const EdgeInsets.symmetric(
+                                          horizontal: 12, vertical: 2),
+                                      childrenPadding:
+                                          const EdgeInsets.fromLTRB(
+                                              16, 4, 16, 12),
+                                      title: Text(
+                                        '[${finding.time}] ${findingEventLabel(finding.code)}',
+                                        style: TextStyle(
+                                          color: color,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                      subtitle: Padding(
+                                        padding: const EdgeInsets.only(top: 4),
+                                        child: Text(finding.message),
+                                      ),
+                                      trailing: _typePill(finding.type, scheme),
+                                      children: <Widget>[
+                                        if (kDeveloperBuild)
+                                          _detailField(
+                                              '상태', trainStateLabel(finding.state)),
+                                        if (kDeveloperBuild)
+                                          _detailField('진단 코드', finding.code),
+                                        _detailField('근거 신호', finding.evidence),
+                                        if ((finding.checkPoint ?? '').isNotEmpty)
+                                          _detailField(
+                                            kDeveloperBuild
+                                                ? '확인 포인트'
+                                                : '해석 참고',
+                                            finding.checkPoint!,
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
                   ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _infoChip({required IconData icon, required String text}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEFF7F3),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: const Color(0xFFB9D8CB)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(icon, size: 14, color: const Color(0xFF0E4F46)),
+          const SizedBox(width: 6),
+          Text(
+            text,
+            style: const TextStyle(
+              color: Color(0xFF0E4F46),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildDoubleParkingSimulator() {
-    if (parsedTodayDial == null) {
-      return const Center(
-        child: Text(
-          '오늘 다이얼 업로드 후 시뮬레이션이 가능합니다.',
-          style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-        ),
-      );
-    }
-    if (parsedTomorrowDial == null) {
-      return const Center(
-        child: Text(
-          '명일 다이얼 업로드 후 시뮬레이션이 가능합니다.',
-          style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-        ),
-      );
-    }
-
-    final result = DoubleParkingEngine.simulate(
-      todayDial: parsedTodayDial!,
-      tomorrowDial: parsedTomorrowDial!,
-    );
-
-    return ListView(
-      padding: const EdgeInsets.all(12),
-      children: [
-        Card(
-          color: Colors.indigo.shade50,
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Text(
-              _okdongSummaryText(result.okdongSummary),
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+  Widget _buildTypeFilterDropdown() {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.black26),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: DropdownButton<EntryType?>(
+          value: _filterType,
+          underline: const SizedBox.shrink(),
+          hint: const Text('유형 필터'),
+          items: <DropdownMenuItem<EntryType?>>[
+            const DropdownMenuItem<EntryType?>(
+              value: null,
+              child: Text('전체'),
             ),
-          ),
-        ),
-        const SizedBox(height: 6),
-        if (result.warnings.isNotEmpty)
-          Card(
-            color: Colors.red.shade50,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(
-                result.warnings.map((w) => '경고: $w').join('\n'),
-                style:
-                    const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+            ...EntryType.values.map(
+              (type) => DropdownMenuItem<EntryType?>(
+                value: type,
+                child: Text(entryTypeLabel(type)),
               ),
             ),
-          ),
-        if (result.warnings.isNotEmpty) const SizedBox(height: 6),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Text(
-              '입고 순서 가이드: ${result.globalInboundGuide}',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-            ),
-          ),
+          ],
+          onChanged: _isAnalyzing
+              ? null
+              : (EntryType? value) {
+                  setState(() {
+                    _filterType = value;
+                  });
+                },
         ),
-        const SizedBox(height: 6),
-        ...result.lines.map(_buildDoubleParkingLineCard),
-      ],
+      ),
     );
   }
 
-  Widget _buildDoubleParkingLineCard(DoubleParkingLineResult line) {
-    final outText = line.outbound.isEmpty
-        ? '없음'
-        : line.outbound
-            .map((e) => '${e.trainId}(${TimeParser.format(e.timeMins)})')
-            .join(', ');
-    final inText = line.inbound.isEmpty
-        ? '없음'
-        : line.inbound
-            .map((e) => '${e.trainId}(${TimeParser.format(e.timeMins)})')
-            .join(', ');
+  Widget _buildBadges(Map<EntryType, int> counts, ColorScheme scheme) {
+    final ordered = <EntryType>[
+      EntryType.critical,
+      EntryType.warning,
+      EntryType.info,
+      EntryType.door,
+      EntryType.atc,
+      EntryType.ato,
+      EntryType.tcms,
+      EntryType.brake,
+      EntryType.mode,
+    ];
 
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 6),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              line.lineName,
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: ordered
+          .where((type) => (counts[type] ?? 0) > 0)
+          .map((type) => _badge(type, counts[type] ?? 0, scheme))
+          .toList(growable: false),
+    );
+  }
+
+  Widget _badge(EntryType type, int count, ColorScheme scheme) {
+    final color = entryTypeColor(type, scheme);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.14),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withOpacity(0.45)),
+      ),
+      child: Text(
+        '${entryTypeLabel(type)} $count',
+        style: TextStyle(
+          color: color,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
+  Widget _typePill(EntryType type, ColorScheme scheme) {
+    final color = entryTypeColor(type, scheme);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.18),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        entryTypeLabel(type),
+        style: TextStyle(
+          color: color,
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
+  Widget _detailField(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: RichText(
+        text: TextSpan(
+          style: DefaultTextStyle.of(context).style,
+          children: <TextSpan>[
+            TextSpan(
+              text: '$label: ',
+              style: const TextStyle(fontWeight: FontWeight.w700),
             ),
-            const SizedBox(height: 8),
-            Text(
-              '명일 OUT: $outText',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '금일 IN: $inText',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '입고 가이드: ${line.inboundGuide}',
-              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-            ),
-            if (line.warnings.isNotEmpty) const SizedBox(height: 6),
-            if (line.warnings.isNotEmpty)
-              Text(
-                line.warnings.map((w) => '경고: $w').join('\n'),
-                style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.red),
-              ),
+            TextSpan(text: value),
           ],
         ),
       ),
     );
   }
 
-  String _okdongSummaryText(OkdongParkingSummary summary) {
-    final normal =
-        summary.normalIds.isEmpty ? '없음' : summary.normalIds.join(', ');
-    final reserve = summary.reserveId ?? '미확인';
-    final all = summary.allIds.isEmpty ? '없음' : summary.allIds.join(', ');
-    return '옥동 주박(일반4): $normal\n옥동 예비(1): $reserve\n총 5대 기준 확인: $all';
+  Map<EntryType, int> _countByType(List<DiagnosticFinding> findings) {
+    final counts = <EntryType, int>{
+      for (final type in EntryType.values) type: 0,
+    };
+    for (final finding in findings) {
+      counts[finding.type] = (counts[finding.type] ?? 0) + 1;
+    }
+    return counts;
   }
 }
 
-class TimeParser {
-  static const int unknown = 9999;
-
-  static int parse(dynamic value) {
-    if (value == null) return unknown;
-
-    try {
-      if (value is Duration) return value.inMinutes;
-      if (value is DateTime) return value.hour * 60 + value.minute;
-
-      if (value is num) {
-        return _parseExcelNumber(value.toDouble());
-      }
-
-      final s = value.toString().trim();
-      if (s.isEmpty) return unknown;
-
-      final match = RegExp(r'(\d{1,2}):(\d{2})(?::\d{2})?').firstMatch(s);
-      if (match != null) {
-        return int.parse(match.group(1)!) * 60 + int.parse(match.group(2)!);
-      }
-
-      final numeric = double.tryParse(s);
-      if (numeric != null) return _parseExcelNumber(numeric);
-    } catch (_) {}
-
-    return unknown;
-  }
-
-  static int _parseExcelNumber(double value) {
-    if (value < 0) return unknown;
-    final fraction = value - value.floorToDouble();
-    if (value < 2) {
-      return (value * 24 * 60).round();
-    }
-    if (fraction > 0) {
-      return (fraction * 24 * 60).round();
-    }
-    return unknown;
-  }
-
-  static double toExcelTime(int mins) {
-    if (mins == unknown) return 0;
-    return mins / (24 * 60);
-  }
-
-  static String format(int mins) {
-    if (mins == unknown) return '-';
-    final h = mins ~/ 60;
-    final m = mins % 60;
-    return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
-  }
+enum TrainState {
+  inactive,
+  controlPending,
+  berthed,
+  doorOpen,
+  doorClosing,
+  readyToDepart,
+  departureCommand,
+  running,
+  braking,
+  forcedBraking,
+  inhibited,
+  emergency,
 }
 
-class XlsxSheetDoc {
-  final Archive archive;
-  final String sheetPath;
-  final XmlDocument sheetDocument;
-  final List<String> sharedStrings;
+enum OperationMode {
+  unknown,
+  manual,
+  auto,
+  yard,
+  emergency,
+  emergencyRescue,
+}
 
-  XlsxSheetDoc({
-    required this.archive,
-    required this.sheetPath,
-    required this.sheetDocument,
-    required this.sharedStrings,
+enum EntryType {
+  info,
+  door,
+  atc,
+  ato,
+  tcms,
+  brake,
+  mode,
+  warning,
+  critical,
+}
+
+class SignalDefinition {
+  final String key;
+  final String label;
+  final String description;
+  final String type;
+  final String category;
+  final String confidence;
+
+  const SignalDefinition({
+    required this.key,
+    required this.label,
+    required this.description,
+    required this.type,
+    required this.category,
+    this.confidence = '확정',
+  });
+}
+
+class LogRecord {
+  final int index;
+  final String time;
+  final Map<String, dynamic> values;
+
+  const LogRecord({
+    required this.index,
+    required this.time,
+    required this.values,
   });
 
-  static XlsxSheetDoc fromBytes(Uint8List bytes,
-      {String preferredSheetName = '평일'}) {
-    final archive = ZipDecoder().decodeBytes(bytes, verify: false);
-    final sheetPath = _resolveSheetPath(archive, preferredSheetName);
-    final sheetXml = XmlDocument.parse(
-        utf8.decode(_fileBytes(archive, sheetPath), allowMalformed: true));
-    final sharedStrings = _parseSharedStrings(archive);
-
-    return XlsxSheetDoc(
-      archive: archive,
-      sheetPath: sheetPath,
-      sheetDocument: sheetXml,
-      sharedStrings: sharedStrings,
-    );
-  }
-
-  Iterable<XmlElement> get rows => sheetDocument.descendants
-      .whereType<XmlElement>()
-      .where((e) => e.name.local == 'row');
-
-  int rowNumber(XmlElement row) {
-    final direct = int.tryParse(row.getAttribute('r') ?? '');
-    if (direct != null) return direct;
-
-    final firstCell = firstOrNull(
-        row.children.whereType<XmlElement>().where((e) => e.name.local == 'c'));
-    if (firstCell == null) return -1;
-    final ref = firstCell.getAttribute('r') ?? '';
-    final digits = ref.replaceAll(RegExp(r'[^0-9]'), '');
-    return int.tryParse(digits) ?? -1;
-  }
-
-  dynamic readCellValue(XmlElement row, int columnIndex) {
-    final cell = _findCellByColumn(row, columnIndex);
-    return _readCellValue(cell, sharedStrings);
-  }
-
-  dynamic readByRef(String cellRef) {
-    final rowNum = _rowNumberFromRef(cellRef);
-    final colIndex = _columnIndexFromRef(cellRef);
-    if (rowNum < 1 || colIndex < 0) return null;
-    final row = firstOrNull(rows.where((r) => rowNumber(r) == rowNum));
-    if (row == null) return null;
-    return readCellValue(row, colIndex);
-  }
-
-  void writeCell(XmlElement row, int columnIndex, Object? value,
-      {required bool asText}) {
-    final rowNum = rowNumber(row);
-    if (rowNum < 1) return;
-    final cell = _ensureCell(row, columnIndex, rowNum);
-    _writeCellValue(cell, value, asText: asText);
-  }
-
-  void writeAt(int rowNumber1Based, int columnIndex, Object? value,
-      {required bool asText}) {
-    if (rowNumber1Based < 1) return;
-    final row = _ensureRow(rowNumber1Based);
-    final cell = _ensureCell(row, columnIndex, rowNumber1Based);
-    _writeCellValue(cell, value, asText: asText);
-  }
-
-  Uint8List encode() {
-    final updatedSheet = sheetDocument.toXmlString(pretty: false);
-    final index = archive.files
-        .indexWhere((f) => _normalizePath(f.name) == _normalizePath(sheetPath));
-    if (index < 0) {
-      throw Exception('시트 파일을 저장할 수 없습니다: $sheetPath');
+  String stringValue(String key) {
+    final value = values[key];
+    if (value == null) {
+      return '';
     }
-    archive.files[index] = ArchiveFile.string(sheetPath, updatedSheet);
-    final encoded = ZipEncoder().encode(archive);
-    if (encoded == null) {
-      throw Exception('엑셀 zip 인코딩에 실패했습니다.');
+    if (value is String) {
+      return value.trim();
     }
-    return Uint8List.fromList(encoded);
+    return value.toString().trim();
   }
 
-  static String _resolveSheetPath(Archive archive, String preferredSheetName) {
-    final workbookPath = 'xl/workbook.xml';
-    final workbook = XmlDocument.parse(
-        utf8.decode(_fileBytes(archive, workbookPath), allowMalformed: true));
-    final sheetElements = workbook.descendants
-        .whereType<XmlElement>()
-        .where((e) => e.name.local == 'sheet')
-        .toList();
-    if (sheetElements.isEmpty) {
-      throw Exception('workbook.xml에서 시트를 찾지 못했습니다.');
+  double numberValue(String key) {
+    final value = values[key];
+    if (value == null) {
+      return 0;
     }
-
-    final selected = firstOrNull(sheetElements
-            .where((s) => s.getAttribute('name') == preferredSheetName)) ??
-        sheetElements.first;
-    final relId = _attributeByLocalName(selected, 'id');
-    if (relId.isEmpty) {
-      return _firstWorksheetPath(archive);
-    }
-
-    final relsPath = 'xl/_rels/workbook.xml.rels';
-    final relsDoc = XmlDocument.parse(
-        utf8.decode(_fileBytes(archive, relsPath), allowMalformed: true));
-    final rel = firstOrNull(
-      relsDoc.descendants.whereType<XmlElement>().where(
-            (e) =>
-                e.name.local == 'Relationship' && e.getAttribute('Id') == relId,
-          ),
-    );
-
-    final target = rel?.getAttribute('Target');
-    if (target == null || target.isEmpty) {
-      return _firstWorksheetPath(archive);
-    }
-
-    final normalizedTarget = _normalizeSheetTarget(target);
-    final exists = archive.files
-        .any((f) => _normalizePath(f.name) == _normalizePath(normalizedTarget));
-    if (exists) return normalizedTarget;
-    return _firstWorksheetPath(archive);
-  }
-
-  static String _firstWorksheetPath(Archive archive) {
-    final worksheets = archive.files
-        .map((f) => _normalizePath(f.name))
-        .where((name) =>
-            name.startsWith('xl/worksheets/') && name.endsWith('.xml'))
-        .toList()
-      ..sort();
-    if (worksheets.isEmpty) {
-      throw Exception('엑셀 워크시트를 찾지 못했습니다.');
-    }
-    return worksheets.first;
-  }
-
-  static String _normalizeSheetTarget(String target) {
-    var normalized = _normalizePath(target);
-    while (normalized.startsWith('../')) {
-      normalized = normalized.substring(3);
-    }
-    if (normalized.startsWith('/')) {
-      normalized = normalized.substring(1);
-    }
-    if (normalized.startsWith('xl/')) {
-      return normalized;
-    }
-    return 'xl/$normalized';
-  }
-
-  static List<String> _parseSharedStrings(Archive archive) {
-    const sharedPath = 'xl/sharedStrings.xml';
-    final exists =
-        archive.files.any((f) => _normalizePath(f.name) == sharedPath);
-    if (!exists) return const [];
-
-    final doc = XmlDocument.parse(
-        utf8.decode(_fileBytes(archive, sharedPath), allowMalformed: true));
-    final siElements = doc.descendants
-        .whereType<XmlElement>()
-        .where((e) => e.name.local == 'si');
-    return siElements.map(_inlineTextFromSi).toList();
-  }
-
-  static String _inlineTextFromSi(XmlElement si) {
-    final directT = firstOrNull(
-        si.children.whereType<XmlElement>().where((e) => e.name.local == 't'));
-    if (directT != null) return directT.innerText;
-    return si.descendants
-        .whereType<XmlElement>()
-        .where((e) => e.name.local == 't')
-        .map((e) => e.innerText)
-        .join();
-  }
-
-  static String _attributeByLocalName(XmlElement element, String localName) {
-    return firstOrNull(
-                element.attributes.where((a) => a.name.local == localName))
-            ?.value ??
-        '';
-  }
-
-  static Uint8List _fileBytes(Archive archive, String path) {
-    final normalizedPath = _normalizePath(path);
-    final file = firstOrNull(
-        archive.files.where((f) => _normalizePath(f.name) == normalizedPath));
-    if (file == null) {
-      throw Exception('엑셀 내부 파일을 찾을 수 없습니다: $path');
-    }
-    final content = file.content;
-    if (content is Uint8List) return content;
-    if (content is List<int>) return Uint8List.fromList(content);
-    if (content is String) return Uint8List.fromList(utf8.encode(content));
-    throw Exception('지원하지 않는 zip 파일 타입: ${content.runtimeType}');
-  }
-
-  static String _normalizePath(String path) => path.replaceAll('\\', '/');
-
-  XmlElement _ensureRow(int rowNumber1Based) {
-    final existing =
-        firstOrNull(rows.where((r) => rowNumber(r) == rowNumber1Based));
-    if (existing != null) return existing;
-
-    final row = XmlElement(
-      XmlName('row'),
-      [XmlAttribute(XmlName('r'), rowNumber1Based.toString())],
-      const [],
-    );
-    _sheetDataElement.children.add(row);
-    return row;
-  }
-
-  XmlElement get _sheetDataElement {
-    final element = firstOrNull(
-      sheetDocument.descendants
-          .whereType<XmlElement>()
-          .where((e) => e.name.local == 'sheetData'),
-    );
-    if (element == null) {
-      throw Exception('sheetData 엘리먼트를 찾지 못했습니다.');
-    }
-    return element;
-  }
-
-  static XmlElement? _findCellByColumn(XmlElement row, int columnIndex) {
-    for (final cell in row.children
-        .whereType<XmlElement>()
-        .where((e) => e.name.local == 'c')) {
-      final ref = cell.getAttribute('r') ?? '';
-      final col = _columnIndexFromRef(ref);
-      if (col == columnIndex) return cell;
-    }
-    return null;
-  }
-
-  static XmlElement _ensureCell(XmlElement row, int columnIndex, int rowIndex) {
-    final existing = _findCellByColumn(row, columnIndex);
-    if (existing != null) return existing;
-
-    final ref = '${_columnName(columnIndex)}$rowIndex';
-    final newCell =
-        XmlElement(XmlName('c'), [XmlAttribute(XmlName('r'), ref)], []);
-    row.children.add(newCell);
-    return newCell;
-  }
-
-  static dynamic _readCellValue(XmlElement? cell, List<String> sharedStrings) {
-    if (cell == null) return null;
-
-    final type = cell.getAttribute('t') ?? '';
-    if (type == 'inlineStr') {
-      return _inlineTextFromCell(cell);
-    }
-
-    final vElement = firstOrNull(cell.children
-        .whereType<XmlElement>()
-        .where((e) => e.name.local == 'v'));
-    final raw = vElement?.innerText.trim() ?? '';
-    if (raw.isEmpty) return null;
-
-    if (type == 's') {
-      final index = int.tryParse(raw);
-      if (index == null || index < 0 || index >= sharedStrings.length)
-        return '';
-      return sharedStrings[index];
-    }
-    if (type == 'b') return raw == '1';
-
-    final asNum = num.tryParse(raw);
-    if (asNum != null) return asNum;
-    return raw;
-  }
-
-  static String _inlineTextFromCell(XmlElement cell) {
-    final isElement = firstOrNull(cell.children
-        .whereType<XmlElement>()
-        .where((e) => e.name.local == 'is'));
-    if (isElement == null) return '';
-    final texts = isElement.descendants
-        .whereType<XmlElement>()
-        .where((e) => e.name.local == 't')
-        .map((e) => e.innerText)
-        .toList();
-    return texts.join();
-  }
-
-  static void _writeCellValue(XmlElement cell, Object? value,
-      {required bool asText}) {
-    final clean = value?.toString() ?? '';
-    cell.children.clear();
-
-    if (clean.isEmpty) {
-      cell.attributes.removeWhere((a) => a.name.local == 't');
-      return;
-    }
-
-    if (asText) {
-      cell.attributes.removeWhere((a) => a.name.local == 't');
-      cell.attributes.add(XmlAttribute(XmlName('t'), 'inlineStr'));
-      cell.children.add(
-        XmlElement(
-          XmlName('is'),
-          const [],
-          [
-            XmlElement(XmlName('t'), const [], [XmlText(clean)])
-          ],
-        ),
-      );
-      return;
-    }
-
-    cell.attributes.removeWhere((a) => a.name.local == 't');
-    final numText = _normalizeNumberText(clean);
-    cell.children.add(XmlElement(XmlName('v'), const [], [XmlText(numText)]));
-  }
-
-  static String _normalizeNumberText(String text) {
-    final parsed = num.tryParse(text);
-    if (parsed == null) return text;
-    if (parsed is int) return parsed.toString();
-    final formatted = parsed.toStringAsFixed(15);
-    return formatted
-        .replaceFirst(RegExp(r'0+$'), '')
-        .replaceFirst(RegExp(r'\.$'), '');
-  }
-
-  static int _columnIndexFromRef(String cellRef) {
-    final letters = cellRef.toUpperCase().replaceAll(RegExp(r'[^A-Z]'), '');
-    if (letters.isEmpty) return -1;
-    var result = 0;
-    for (final code in letters.codeUnits) {
-      result = result * 26 + (code - 64);
-    }
-    return result - 1;
-  }
-
-  static int _rowNumberFromRef(String cellRef) {
-    final digits = cellRef.replaceAll(RegExp(r'[^0-9]'), '');
-    return int.tryParse(digits) ?? -1;
-  }
-
-  static String _columnName(int index) {
-    var n = index + 1;
-    final chars = <int>[];
-    while (n > 0) {
-      n--;
-      chars.add(65 + (n % 26));
-      n ~/= 26;
-    }
-    return String.fromCharCodes(chars.reversed);
-  }
-}
-
-class CompanyDialParser {
-  static const int headerRow = 3;
-  static const int outSlotCol = 1;
-  static const int outTrainCol = 3;
-  static const int outTimeCol = 4;
-  static const int outLaneCol = 5;
-  static const int outNoteCol = 6;
-  static const int inTrainCol = 9;
-  static const int inTimeCol = 10;
-  static const int inLaneCol = 11;
-  static const int inspectCol = 12;
-  static const int inNoteCol = 13;
-
-  static ParsedCompanyDial parse(Uint8List bytes) {
-    final xlsx = XlsxSheetDoc.fromBytes(bytes, preferredSheetName: '평일');
-    final fixedReserveText = xlsx.readByRef('G35');
-    final fixedReserveId = _normalizeId(fixedReserveText);
-
-    final departures = <String, int>{};
-    final departureRows = <ParsedDepartureRow>[];
-    final arrivals = <ParsedArrivalRow>[];
-
-    for (final row in xlsx.rows) {
-      final rowNum = xlsx.rowNumber(row);
-      if (rowNum <= headerRow + 1) continue;
-      try {
-        final outId = _normalizeId(xlsx.readCellValue(row, outTrainCol));
-        if (outId.isNotEmpty) {
-          final departureMins =
-              TimeParser.parse(xlsx.readCellValue(row, outTimeCol));
-          departures[outId] = departureMins;
-          departureRows.add(
-            ParsedDepartureRow(
-              slot: _parseSlot(xlsx.readCellValue(row, outSlotCol),
-                  departureRows.length + 1),
-              trainId: outId,
-              departureMins: departureMins,
-              lane: _stringify(xlsx.readCellValue(row, outLaneCol)),
-              note: _stringify(xlsx.readCellValue(row, outNoteCol)),
-            ),
-          );
-        }
-
-        final inId = _normalizeId(xlsx.readCellValue(row, inTrainCol));
-        if (inId.isNotEmpty) {
-          arrivals.add(
-            ParsedArrivalRow(
-              trainId: inId,
-              arrivalMins: TimeParser.parse(xlsx.readCellValue(row, inTimeCol)),
-              lane: _stringify(xlsx.readCellValue(row, inLaneCol)),
-              inspection: _stringify(xlsx.readCellValue(row, inspectCol)),
-              note: _stringify(xlsx.readCellValue(row, inNoteCol)),
-            ),
-          );
-        }
-      } catch (_) {
-        continue;
-      }
-    }
-
-    return ParsedCompanyDial(
-      departures: departures,
-      departureRows: departureRows,
-      arrivals: arrivals,
-      okdongReserveFromG35: fixedReserveId.isEmpty ? null : fixedReserveId,
-    );
-  }
-
-  static int _parseSlot(dynamic value, int fallback) {
-    if (value is num) return value.toInt();
-    final text = _stringify(value);
-    final intValue = int.tryParse(text);
-    if (intValue != null) return intValue;
-    final doubleValue = double.tryParse(text);
-    if (doubleValue != null && doubleValue == doubleValue.roundToDouble()) {
-      return doubleValue.toInt();
-    }
-    return fallback;
-  }
-
-  static String _normalizeId(dynamic value) {
-    if (value == null) return '';
     if (value is num) {
-      final asInt = value.toInt();
-      if (value == asInt.toDouble()) {
-        if (asInt >= 101 && asInt <= 123) return asInt.toString();
-      }
-      return '';
+      return value.toDouble();
     }
     final text = value.toString().trim();
-    final intValue = int.tryParse(text);
-    if (intValue != null) {
-      if (intValue >= 101 && intValue <= 123) return intValue.toString();
-      return '';
+    if (text.isEmpty) {
+      return 0;
     }
-    final doubleValue = double.tryParse(text);
-    if (doubleValue != null && doubleValue == doubleValue.roundToDouble()) {
-      final asInt = doubleValue.toInt();
-      if (asInt >= 101 && asInt <= 123) return asInt.toString();
-      return '';
-    }
-    if (!RegExp(r'^\d{3}$').hasMatch(text)) return '';
-    final id = int.tryParse(text);
-    if (id == null || id < 101 || id > 123) return '';
-    return text;
+    final normalized = text.replaceAll(',', '');
+    return double.tryParse(normalized) ?? 0;
   }
 
-  static String _stringify(dynamic value) {
-    if (value == null) return '';
-    final text = value.toString().trim();
-    if (text == 'null') return '';
-    return text;
-  }
-}
-
-class TrainAutoMapper {
-  static const Set<TrainStatus> _autoManagedOnUpload = {
-    TrainStatus.maintenance,
-    TrainStatus.outOfService,
-    TrainStatus.research,
-    TrainStatus.night7D,
-    TrainStatus.morning7D,
-    TrainStatus.afternoon7D,
-    TrainStatus.cleaning,
-    TrainStatus.okdongStay,
-    TrainStatus.okdongReserve,
-  };
-
-  static List<Train> applyTodayInfoBulk(
-      List<Train> trains, ParsedCompanyDial parsed) {
-    final latestByOkdongSlot = <String, ParsedArrivalRow>{};
-    final explicitReserveIds = <String>{};
-
-    for (final arrival in parsed.arrivals) {
-      final combined = '${arrival.lane} ${arrival.note}';
-      if (combined.contains('예비')) {
-        explicitReserveIds.add(arrival.trainId);
-      }
-
-      final slot = _extractOkdongSlot(combined);
-      if (slot == null) continue;
-
-      final previous = latestByOkdongSlot[slot];
-      if (previous == null || _isLaterArrival(arrival, previous)) {
-        latestByOkdongSlot[slot] = arrival;
-      }
+  bool boolValue(String key) {
+    final value = values[key];
+    if (value == null) {
+      return false;
     }
-
-    final okdongStayIds =
-        latestByOkdongSlot.values.map((a) => a.trainId).toSet();
-    final reserveIds = parsed.okdongReserveFromG35 != null
-        ? <String>{parsed.okdongReserveFromG35!}
-        : (explicitReserveIds.isNotEmpty
-            ? explicitReserveIds
-            : _inferReserveIds(trains, parsed));
-
-    return trains.map((train) {
-      final dep = parsed.departures[train.id] ?? train.departureMins;
-      final next = {...train.statuses}..removeAll(_autoManagedOnUpload);
-
-      if (okdongStayIds.contains(train.id)) {
-        next.add(TrainStatus.okdongStay);
-      }
-      if (reserveIds.contains(train.id)) {
-        next.add(TrainStatus.okdongReserve);
-        next.add(TrainStatus.okdongStay);
-      }
-
-      return train.copyWith(departureMins: dep, statuses: next);
-    }).toList();
-  }
-
-  static Set<String> _inferReserveIds(
-      List<Train> trains, ParsedCompanyDial parsed) {
-    final allIds = trains.map((t) => t.id).toSet();
-    final movedIds = <String>{
-      ...parsed.departures.keys,
-      ...parsed.arrivals.map((a) => a.trainId)
-    };
-    final idleIds = allIds.difference(movedIds).toList()..sort();
-    if (idleIds.length == 1) {
-      return {idleIds.first};
+    if (value is bool) {
+      return value;
     }
-    return const <String>{};
-  }
-
-  static String? _extractOkdongSlot(String text) {
-    final match = RegExp(r'옥동\s*([1-4])').firstMatch(text);
-    if (match == null) return null;
-    final num = match.group(1);
-    if (num == null) return null;
-    return '옥동$num';
-  }
-
-  static bool _isLaterArrival(ParsedArrivalRow a, ParsedArrivalRow b) {
-    final aMins = a.arrivalMins == TimeParser.unknown ? -1 : a.arrivalMins;
-    final bMins = b.arrivalMins == TimeParser.unknown ? -1 : b.arrivalMins;
-    return aMins > bMins;
-  }
-}
-
-class DoubleParkingEntry {
-  final String trainId;
-  final int timeMins;
-
-  const DoubleParkingEntry({
-    required this.trainId,
-    required this.timeMins,
-  });
-}
-
-class DoubleParkingLineResult {
-  final String lineName;
-  final List<DoubleParkingEntry> outbound;
-  final List<DoubleParkingEntry> inbound;
-  final String inboundGuide;
-  final List<String> warnings;
-
-  const DoubleParkingLineResult({
-    required this.lineName,
-    required this.outbound,
-    required this.inbound,
-    required this.inboundGuide,
-    required this.warnings,
-  });
-}
-
-class OkdongParkingSummary {
-  final List<String> normalIds;
-  final String? reserveId;
-  final List<String> allIds;
-  final List<String> warnings;
-
-  const OkdongParkingSummary({
-    required this.normalIds,
-    required this.reserveId,
-    required this.allIds,
-    required this.warnings,
-  });
-}
-
-class DoubleParkingResult {
-  final List<DoubleParkingLineResult> lines;
-  final String globalInboundGuide;
-  final List<String> warnings;
-  final OkdongParkingSummary okdongSummary;
-
-  const DoubleParkingResult({
-    required this.lines,
-    required this.globalInboundGuide,
-    required this.warnings,
-    required this.okdongSummary,
-  });
-}
-
-class DoubleParkingEngine {
-  static const List<String> monitoredLines = [
-    'M1',
-    'M2',
-    'D3',
-    'D2',
-    'D1',
-    'C2',
-    'C1'
-  ];
-
-  static DoubleParkingResult simulate({
-    required ParsedCompanyDial todayDial,
-    required ParsedCompanyDial tomorrowDial,
-  }) {
-    final inboundByLine = <String, List<DoubleParkingEntry>>{
-      for (final line in monitoredLines) line: <DoubleParkingEntry>[],
-    };
-    final outboundByLine = <String, List<DoubleParkingEntry>>{
-      for (final line in monitoredLines) line: <DoubleParkingEntry>[],
-    };
-    final globalWarnings = <String>[];
-
-    for (final arrival in todayDial.arrivals) {
-      final line = _lineFromText('${arrival.lane} ${arrival.note}');
-      if (line == null) continue;
-      inboundByLine[line]!.add(
-        DoubleParkingEntry(
-          trainId: arrival.trainId,
-          timeMins: arrival.arrivalMins,
-        ),
-      );
+    if (value is num) {
+      return value != 0;
     }
-
-    for (final departure in tomorrowDial.departureRows) {
-      final line = _lineFromText('${departure.lane} ${departure.note}');
-      if (line == null) continue;
-      outboundByLine[line]!.add(
-        DoubleParkingEntry(
-          trainId: departure.trainId,
-          timeMins: departure.departureMins,
-        ),
-      );
+    final text = value.toString().trim().toLowerCase();
+    if (text.isEmpty) {
+      return false;
     }
-
-    for (final line in monitoredLines) {
-      inboundByLine[line]!.sort((a, b) => _timeSort(a.timeMins, b.timeMins));
-      outboundByLine[line]!.sort((a, b) => _timeSort(a.timeMins, b.timeMins));
-    }
-
-    _validateDuplicateTrainUse(outboundByLine, globalWarnings, '명일 출고');
-    _validateDuplicateTrainUse(inboundByLine, globalWarnings, '금일 입고');
-
-    final lineResults = monitoredLines.map((line) {
-      final inbound = inboundByLine[line]!;
-      final outbound = outboundByLine[line]!;
-      final warnings = <String>[];
-
-      if (inbound.isNotEmpty && outbound.isNotEmpty) {
-        final firstOut = outbound.first.timeMins;
-        final lastIn = inbound.last.timeMins;
-        if (_isKnownTime(firstOut) &&
-            _isKnownTime(lastIn) &&
-            firstOut < lastIn) {
-          warnings.add('해당 선로에서 명일 첫 출고가 금일 마지막 입고보다 빠릅니다.');
-        }
-      }
-
-      if (outbound.length > inbound.length + 1) {
-        warnings.add('해당 선로의 출고 편성이 입고 대비 많아 초기 배치 점검이 필요합니다.');
-      }
-
-      final inboundGuide = inbound.isEmpty
-          ? '입고 없음'
-          : inbound
-              .asMap()
-              .entries
-              .map((e) => '${e.key + 1}.${e.value.trainId}')
-              .join(' -> ');
-
-      return DoubleParkingLineResult(
-        lineName: line,
-        outbound: outbound,
-        inbound: inbound,
-        inboundGuide: inboundGuide,
-        warnings: warnings,
-      );
-    }).toList();
-
-    final globalInbound = lineResults.expand((l) => l.inbound).toList()
-      ..sort((a, b) => _timeSort(a.timeMins, b.timeMins));
-    final globalInboundGuide = globalInbound.isEmpty
-        ? '입고 데이터 없음'
-        : globalInbound
-            .asMap()
-            .entries
-            .map((e) => '${e.key + 1}.${e.value.trainId}')
-            .join(' -> ');
-
-    final okdongSummary = _buildOkdongSummary(todayDial, tomorrowDial);
-    globalWarnings.addAll(okdongSummary.warnings);
-
-    return DoubleParkingResult(
-      lines: lineResults,
-      globalInboundGuide: globalInboundGuide,
-      warnings: globalWarnings,
-      okdongSummary: okdongSummary,
-    );
-  }
-
-  static OkdongParkingSummary _buildOkdongSummary(
-    ParsedCompanyDial todayDial,
-    ParsedCompanyDial tomorrowDial,
-  ) {
-    final latestBySlot = <String, ParsedArrivalRow>{};
-    String? explicitReserveId;
-    final warnings = <String>[];
-
-    for (final arrival in todayDial.arrivals) {
-      final combined = '${arrival.lane} ${arrival.note}';
-      final slot = _extractOkdongSlot(combined);
-      if (slot != null) {
-        final prev = latestBySlot[slot];
-        if (prev == null ||
-            _timeSort(arrival.arrivalMins, prev.arrivalMins) > 0) {
-          latestBySlot[slot] = arrival;
-        }
-      }
-      if (combined.contains('옥동') && combined.contains('예비')) {
-        explicitReserveId ??= arrival.trainId;
-      }
-    }
-
-    final normalIds = latestBySlot.values.map((e) => e.trainId).toSet().toList()
-      ..sort();
-    final fixedReserveId = todayDial.okdongReserveFromG35;
-    final reserveId = fixedReserveId ?? explicitReserveId;
-    if (fixedReserveId != null &&
-        fixedReserveId.isNotEmpty &&
-        explicitReserveId != null &&
-        explicitReserveId.isNotEmpty &&
-        fixedReserveId != explicitReserveId) {
-      warnings.add(
-          '금일 옥동 예비차가 G35($fixedReserveId)와 입고 메모($explicitReserveId)에서 다릅니다. G35를 우선 적용합니다.');
-    }
-    final allSet = {...normalIds};
-    if (reserveId != null && reserveId.isNotEmpty) {
-      allSet.add(reserveId);
-    }
-    final allIds = allSet.toList()..sort();
-
-    if (allIds.length != 5) {
-      warnings.add('옥동 주박 5대 규칙 불일치: 현재 ${allIds.length}대입니다.');
-    }
-    if (reserveId == null || reserveId.isEmpty) {
-      warnings.add('금일 옥동 예비차를 명시적으로 찾지 못했습니다.');
-    }
-
-    final tomorrowOkdongOut = tomorrowDial.departureRows
-        .where((a) => a.lane.contains('옥동'))
-        .map((a) => a.trainId)
-        .toSet();
-    if (reserveId != null &&
-        reserveId.isNotEmpty &&
-        !tomorrowOkdongOut.contains(reserveId)) {
-      warnings.add('금일 옥동 예비차($reserveId)가 명일 옥동 출고에 포함되지 않았습니다.');
-    }
-
-    return OkdongParkingSummary(
-      normalIds: normalIds,
-      reserveId: reserveId,
-      allIds: allIds,
-      warnings: warnings,
-    );
-  }
-
-  static void _validateDuplicateTrainUse(
-    Map<String, List<DoubleParkingEntry>> byLine,
-    List<String> warnings,
-    String kind,
-  ) {
-    final lineByTrain = <String, String>{};
-    for (final entry in byLine.entries) {
-      for (final item in entry.value) {
-        final prev = lineByTrain[item.trainId];
-        if (prev != null && prev != entry.key) {
-          warnings.add(
-              '$kind 중복: ${item.trainId}가 $prev, ${entry.key}에 동시에 배치되었습니다.');
-        } else {
-          lineByTrain[item.trainId] = entry.key;
-        }
-      }
-    }
-  }
-
-  static String? _extractOkdongSlot(String text) {
-    final match = RegExp(r'옥동\s*([1-4])').firstMatch(text);
-    if (match == null) return null;
-    final num = match.group(1);
-    return num == null ? null : '옥동$num';
-  }
-
-  static bool _isKnownTime(int mins) => mins != TimeParser.unknown;
-
-  static int _timeSort(int a, int b) {
-    final aa = a == TimeParser.unknown ? 999999 : a;
-    final bb = b == TimeParser.unknown ? 999999 : b;
-    return aa.compareTo(bb);
-  }
-
-  static String? _lineFromText(String text) {
-    final upper = text.toUpperCase().replaceAll(' ', '');
-    for (final line in monitoredLines) {
-      if (upper.contains(line)) return line;
-    }
-    return null;
-  }
-}
-
-class TomorrowDialEngine {
-  static const int minTurnbackMinutes = 105;
-  static const Map<int, TrainStatus> fixedStatusSlots = {
-    3: TrainStatus.cleaning,
-    5: TrainStatus.night7D,
-    7: TrainStatus.morning7D,
-    9: TrainStatus.morning7D,
-    10: TrainStatus.afternoon7D,
-    15: TrainStatus.afternoon7D,
-    12: TrainStatus.oneLoop,
-    13: TrainStatus.oneLoop,
-  };
-  static const Map<int, int> circulationPairSlots = {
-    7: 10,
-    9: 15,
-  };
-
-  static List<String> evaluateTurnbackGaps(List<ParsedDepartureRow> slots) {
-    final warnings = <String>[];
-    final bySlot = <int, ParsedDepartureRow>{
-      for (final slot in slots) slot.slot: slot
-    };
-    for (final pair in circulationPairSlots.entries) {
-      final from = bySlot[pair.key];
-      final to = bySlot[pair.value];
-      if (from == null || to == null) continue;
-      final gap = _turnbackGapMinutes(from.departureMins, to.departureMins);
-      if (gap < 0) continue;
-      if (gap < minTurnbackMinutes) {
-        warnings.add(
-          '105분 회차 점검: ${pair.key}→${pair.value} 간격 ${gap}분 (기준 ${minTurnbackMinutes}분 미만)',
-        );
-      }
-    }
-    return warnings;
-  }
-
-  static TomorrowDialGenerationResult generateDetailed({
-    required List<Train> trains,
-    required ParsedCompanyDial todayDial,
-    required Set<String> okdongForbidden,
-  }) {
-    final slots = todayDial.departureRows.take(18).toList()
-      ..sort((a, b) => a.slot.compareTo(b.slot));
-    final slotByNumber = <int, ParsedDepartureRow>{
-      for (final slot in slots) slot.slot: slot
-    };
-    final assignmentsBySlot = <int, TomorrowAssignment>{};
-    final usedTrainIds = <String>{};
-    final usedSlotsByTrain = <String, Set<int>>{};
-    final logs = <String>[];
-    final available = trains.where((t) => !_isExcluded(t)).toList();
-
-    Train? pickForSlot(
-      ParsedDepartureRow slot,
-      bool Function(Train) predicate, {
-      bool highMileage = false,
-    }) {
-      final isOkdongSlot = _isOkdongLane(slot.lane);
-      final pool = available.where((train) {
-        if (usedTrainIds.contains(train.id)) return false;
-        if (isOkdongSlot && okdongForbidden.contains(train.id)) return false;
-        return predicate(train);
-      }).toList()
-        ..sort((a, b) => _compareTrain(a, b, highMileage: highMileage));
-      return firstOrNull(pool);
-    }
-
-    bool assignSlot(
-      ParsedDepartureRow slot,
-      Train train, {
-      required String note,
-      required String reason,
-    }) {
-      if (assignmentsBySlot.containsKey(slot.slot)) {
-        logs.add('slot ${slot.slot}: skipped($reason), already assigned');
-        return false;
-      }
-      if (usedTrainIds.contains(train.id)) {
-        if (!_canReuseForPairSlot(
-          trainId: train.id,
-          toSlot: slot.slot,
-          usedSlotsByTrain: usedSlotsByTrain,
-          slotByNumber: slotByNumber,
-        )) {
-          logs.add(
-              'slot ${slot.slot}: skipped($reason), train ${train.id} already used');
-          return false;
-        }
-      }
-
-      assignmentsBySlot[slot.slot] = TomorrowAssignment(
-        slot: slot.slot,
-        trainId: train.id,
-        departureMins: slot.departureMins,
-        lane: slot.lane,
-        note: note,
-        reason: reason,
-      );
-      usedTrainIds.add(train.id);
-      usedSlotsByTrain.putIfAbsent(train.id, () => <int>{}).add(slot.slot);
-      logs.add('slot ${slot.slot}: ${train.id} ($reason)');
+    if (text == '1' ||
+        text == 'true' ||
+        text == 'y' ||
+        text == 'yes' ||
+        text == 'on') {
       return true;
     }
-
-    // Level 1: absolute rules
-    final tomorrowReserveSlot = firstOrNull(slots.where((s) => s.slot == 18));
-    if (tomorrowReserveSlot != null) {
-      final reserve = pickForSlot(
-            tomorrowReserveSlot,
-            (t) => t.has(TrainStatus.tomorrowReserve),
-          ) ??
-          pickForSlot(
-            tomorrowReserveSlot,
-            (t) =>
-                t.has(TrainStatus.okdongStay) &&
-                !t.has(TrainStatus.okdongReserve),
-          );
-      if (reserve != null) {
-        assignSlot(
-          tomorrowReserveSlot,
-          reserve,
-          note: statusLabel(TrainStatus.tomorrowReserve),
-          reason: 'L1 tomorrow reserve fixed',
-        );
-      } else {
-        logs.add('slot 18: no candidate for L1 tomorrow reserve');
-      }
+    if (text == '0' ||
+        text == 'false' ||
+        text == 'n' ||
+        text == 'no' ||
+        text == 'off') {
+      return false;
     }
-
-    final okdongOutboundSlots = slots
-        .where((s) => _isOkdongLane(s.lane) && s.slot != 18)
-        .toList()
-      ..sort((a, b) => a.slot.compareTo(b.slot));
-
-    final firstOkdongOutbound = firstOrNull(
-      okdongOutboundSlots.where((s) => !assignmentsBySlot.containsKey(s.slot)),
-    );
-    if (firstOkdongOutbound != null) {
-      final reserveOut = pickForSlot(
-          firstOkdongOutbound, (t) => t.has(TrainStatus.okdongReserve));
-      if (reserveOut != null) {
-        assignSlot(
-          firstOkdongOutbound,
-          reserveOut,
-          note: statusLabel(TrainStatus.okdongReserve),
-          reason: 'L1 today reserve must outbound',
-        );
-      } else {
-        logs.add(
-            'slot ${firstOkdongOutbound.slot}: no candidate for L1 today reserve outbound');
-      }
+    final numeric = double.tryParse(text.replaceAll(',', ''));
+    if (numeric != null) {
+      return numeric != 0;
     }
-
-    // Level 2: okdong structure + forbidden filter
-    for (final slot in okdongOutboundSlots) {
-      if (assignmentsBySlot.containsKey(slot.slot)) continue;
-      final train = pickForSlot(slot, (t) => t.has(TrainStatus.okdongStay));
-      if (train != null) {
-        assignSlot(
-          slot,
-          train,
-          note: statusLabel(TrainStatus.okdongStay),
-          reason: 'L2 keep okdong structure',
-        );
-      } else {
-        logs.add('slot ${slot.slot}: unassigned at L2 (no okdong candidate)');
-      }
-    }
-
-    // Level 2.5: fixed circulation pair priority (7->10, 9->15) with 105-minute rule
-    for (final pair in circulationPairSlots.entries) {
-      final fromSlot = slotByNumber[pair.key];
-      final toSlot = slotByNumber[pair.value];
-      if (fromSlot == null || toSlot == null) continue;
-      if (assignmentsBySlot.containsKey(fromSlot.slot) ||
-          assignmentsBySlot.containsKey(toSlot.slot)) {
-        continue;
-      }
-
-      final gap =
-          _turnbackGapMinutes(fromSlot.departureMins, toSlot.departureMins);
-      if (gap < minTurnbackMinutes) {
-        logs.add(
-          'slot ${fromSlot.slot}->${toSlot.slot}: skip circulation pair (turnback ${gap < 0 ? '미확인' : '${gap}분'})',
-        );
-        continue;
-      }
-
-      final pairTrain = pickForSlot(
-        fromSlot,
-        (t) => t.has(TrainStatus.morning7D) && t.has(TrainStatus.afternoon7D),
-      );
-      if (pairTrain == null) {
-        continue;
-      }
-
-      final morningAssigned = assignSlot(
-        fromSlot,
-        pairTrain,
-        note: statusLabel(TrainStatus.morning7D),
-        reason: 'L2.5 circulation pair start',
-      );
-      if (!morningAssigned) continue;
-
-      final afternoonAssigned = assignSlot(
-        toSlot,
-        pairTrain,
-        note:
-            '${statusLabel(TrainStatus.afternoon7D)} / ${minTurnbackMinutes}분 회차',
-        reason: 'L2.5 circulation pair follow (${gap}분)',
-      );
-      if (!afternoonAssigned) {
-        logs.add(
-            'slot ${toSlot.slot}: circulation follow failed for ${pairTrain.id}');
-      }
-    }
-
-    // Level 3: fixed status slots
-    for (final slot in slots) {
-      if (assignmentsBySlot.containsKey(slot.slot)) continue;
-      if (_isOkdongLane(slot.lane)) continue;
-      final fixedStatus = fixedStatusSlots[slot.slot];
-      if (fixedStatus == null) continue;
-
-      final train = pickForSlot(
-        slot,
-        (t) => t.has(fixedStatus),
-        highMileage: fixedStatus == TrainStatus.oneLoop,
-      );
-      if (train != null) {
-        assignSlot(
-          slot,
-          train,
-          note: statusLabel(fixedStatus),
-          reason: 'L3 fixed slot ${statusLabel(fixedStatus)}',
-        );
-      } else {
-        logs.add(
-            'slot ${slot.slot}: no candidate for L3 fixed slot ${statusLabel(fixedStatus)}');
-      }
-    }
-
-    // Level 4: dial guidance
-    for (final slot in slots) {
-      if (assignmentsBySlot.containsKey(slot.slot)) continue;
-      if (_isOkdongLane(slot.lane)) continue;
-      final train = pickForSlot(slot, (t) => _matchesDialGuide(t, slot));
-      if (train != null) {
-        final fixedStatus = fixedStatusSlots[slot.slot];
-        final note =
-            fixedStatus == null ? '' : '${statusLabel(fixedStatus)} 보강';
-        assignSlot(
-          slot,
-          train,
-          note: note,
-          reason: 'L4 dial guide',
-        );
-      }
-    }
-
-    // Level 5: deterministic mileage fallback
-    for (final slot in slots) {
-      if (assignmentsBySlot.containsKey(slot.slot)) continue;
-      if (_isOkdongLane(slot.lane)) {
-        logs.add(
-            'slot ${slot.slot}: unassigned at L5 (okdong-only slot requires okdong stay train)');
-        continue;
-      }
-      final fixedStatus = fixedStatusSlots[slot.slot];
-      final train = pickForSlot(
-        slot,
-        (t) => true,
-        highMileage: fixedStatus == TrainStatus.oneLoop,
-      );
-      if (train != null) {
-        final note =
-            fixedStatus == null ? '' : '${statusLabel(fixedStatus)} 대체';
-        assignSlot(
-          slot,
-          train,
-          note: note,
-          reason: 'L5 mileage fallback',
-        );
-      } else {
-        logs.add('slot ${slot.slot}: unassigned at L5 (no available train)');
-      }
-    }
-
-    final assignments = assignmentsBySlot.values.toList()
-      ..sort((a, b) => a.slot.compareTo(b.slot));
-    final unassignedSlots = slots
-        .where((s) => !assignmentsBySlot.containsKey(s.slot))
-        .map((s) => s.slot)
-        .toList()
-      ..sort();
-    if (unassignedSlots.isNotEmpty) {
-      logs.add('unassigned slots: ${unassignedSlots.join(', ')}');
-    }
-
-    return TomorrowDialGenerationResult(
-      assignments: assignments,
-      logs: logs,
-      unassignedSlots: unassignedSlots,
-    );
-  }
-
-  static List<TomorrowAssignment> generate({
-    required List<Train> trains,
-    required ParsedCompanyDial todayDial,
-    required Set<String> okdongForbidden,
-  }) {
-    return generateDetailed(
-      trains: trains,
-      todayDial: todayDial,
-      okdongForbidden: okdongForbidden,
-    ).assignments;
-  }
-
-  static Set<int> usedSlots(List<TomorrowAssignment> assigned) {
-    return assigned.map((a) => a.slot).toSet();
-  }
-
-  static bool _canReuseForPairSlot({
-    required String trainId,
-    required int toSlot,
-    required Map<String, Set<int>> usedSlotsByTrain,
-    required Map<int, ParsedDepartureRow> slotByNumber,
-  }) {
-    final usedSlots = usedSlotsByTrain[trainId];
-    if (usedSlots == null || usedSlots.isEmpty) return false;
-    if (usedSlots.length != 1) return false;
-
-    final fromSlot = usedSlots.first;
-    final expectedFrom = _pairFromSlot(toSlot);
-    if (expectedFrom == null || fromSlot != expectedFrom) return false;
-
-    final fromRow = slotByNumber[fromSlot];
-    final toRow = slotByNumber[toSlot];
-    if (fromRow == null || toRow == null) return false;
-    final gap = _turnbackGapMinutes(fromRow.departureMins, toRow.departureMins);
-    return gap >= minTurnbackMinutes;
-  }
-
-  static int? _pairFromSlot(int toSlot) {
-    for (final pair in circulationPairSlots.entries) {
-      if (pair.value == toSlot) return pair.key;
-    }
-    return null;
-  }
-
-  static int _turnbackGapMinutes(int fromMins, int toMins) {
-    if (fromMins == TimeParser.unknown || toMins == TimeParser.unknown)
-      return -1;
-    var gap = toMins - fromMins;
-    while (gap < 0) {
-      gap += 24 * 60;
-    }
-    return gap;
-  }
-
-  static bool _isExcluded(Train train) {
-    return train.has(TrainStatus.maintenance) ||
-        train.has(TrainStatus.outOfService) ||
-        train.has(TrainStatus.research);
-  }
-
-  static bool _isOkdongLane(String lane) => lane.contains('옥동');
-
-  static int _compareTrain(
-    Train a,
-    Train b, {
-    required bool highMileage,
-  }) {
-    final mileageCompare = highMileage
-        ? b.mileage.compareTo(a.mileage)
-        : a.mileage.compareTo(b.mileage);
-    if (mileageCompare != 0) return mileageCompare;
-    return a.id.compareTo(b.id);
-  }
-
-  static bool _matchesDialGuide(Train train, ParsedDepartureRow slot) {
-    if (train.has(TrainStatus.longDia))
-      return slot.note.contains('10') || slot.note.contains('6.5');
-    if (train.has(TrainStatus.mediumDia))
-      return slot.note.contains('5.5') || slot.note.contains('4');
-    if (train.has(TrainStatus.shortDia))
-      return slot.note.contains('2') || slot.note.contains('3');
     return false;
   }
 }
 
-class CompanyExcelWriter {
-  static Uint8List write({
-    required Uint8List templateBytes,
-    required List<TomorrowAssignment> assignments,
-    DoubleParkingResult? doubleParkingResult,
-  }) {
-    final xlsx =
-        XlsxSheetDoc.fromBytes(templateBytes, preferredSheetName: '평일');
+class DiagnosticFinding {
+  final String code;
+  final String time;
+  final TrainState state;
+  final EntryType type;
+  final String message;
+  final List<String> relatedSignals;
+  final String evidence;
+  final String? checkPoint;
+  final int recordIndex;
 
-    final bySlot = {
-      for (final assignment in assignments) assignment.slot: assignment
-    };
-    for (final row in xlsx.rows) {
-      final rowNum = xlsx.rowNumber(row);
-      if (rowNum <= CompanyDialParser.headerRow + 1) continue;
+  const DiagnosticFinding({
+    required this.code,
+    required this.time,
+    required this.state,
+    required this.type,
+    required this.message,
+    required this.relatedSignals,
+    required this.evidence,
+    this.checkPoint,
+    required this.recordIndex,
+  });
+}
 
-      final slot = CompanyDialParser._parseSlot(
-          xlsx.readCellValue(row, CompanyDialParser.outSlotCol), -1);
-      final assignment = bySlot[slot];
-      if (assignment == null) continue;
+typedef RuleCondition = bool Function(
+  LogRecord curr,
+  LogRecord? prev,
+  TrainState state,
+  AnalyzerContext context,
+);
 
-      xlsx.writeCell(row, CompanyDialParser.outTrainCol, assignment.trainId,
-          asText: true);
-      xlsx.writeCell(
-        row,
-        CompanyDialParser.outTimeCol,
-        TimeParser.toExcelTime(assignment.departureMins),
-        asText: false,
+typedef RuleMessageBuilder = String Function(
+  LogRecord curr,
+  LogRecord? prev,
+  TrainState state,
+  AnalyzerContext context,
+);
+
+class DiagnosticRule {
+  final String code;
+  final String title;
+  final EntryType severity;
+  final RuleCondition condition;
+  final RuleMessageBuilder message;
+
+  const DiagnosticRule({
+    required this.code,
+    required this.title,
+    required this.severity,
+    required this.condition,
+    required this.message,
+  });
+}
+
+class AnalyzerEngine {
+  final List<SignalDefinition> signalDefinitions;
+
+  AnalyzerEngine({required this.signalDefinitions});
+
+  List<LogRecord> parseRowsToRecords(List<Map<String, dynamic>> rows) {
+    final records = <LogRecord>[];
+
+    for (var i = 0; i < rows.length; i++) {
+      final row = rows[i];
+      final normalizedMap = <String, dynamic>{};
+
+      for (final entry in row.entries) {
+        final key = normalizeHeader(entry.key);
+        if (key.isEmpty) {
+          continue;
+        }
+        normalizedMap[key] = entry.value;
+      }
+
+      if (_isFullyEmptyRow(normalizedMap)) {
+        continue;
+      }
+
+      final rowIndex = _resolveRowIndex(normalizedMap, i);
+      final time = _normalizeTimeValue(normalizedMap['TIME'], rowIndex);
+
+      records.add(
+        LogRecord(
+          index: rowIndex,
+          time: time,
+          values: normalizedMap,
+        ),
       );
-      xlsx.writeCell(row, CompanyDialParser.outLaneCol, assignment.lane,
-          asText: true);
-      xlsx.writeCell(row, CompanyDialParser.outNoteCol, assignment.note,
-          asText: true);
     }
-
-    if (doubleParkingResult != null) {
-      _writeDoubleParkingBlock(xlsx, doubleParkingResult);
-    }
-
-    return xlsx.encode();
+    return records;
   }
 
-  static void _writeDoubleParkingBlock(
-      XlsxSheetDoc xlsx, DoubleParkingResult result) {
-    const int startCol = 22; // W
-    var row = 4;
+  List<LogRecord> normalizeSignals(List<LogRecord> records) {
+    final typeByKey = <String, String>{
+      for (final def in signalDefinitions) def.key: def.type,
+    };
 
-    xlsx.writeAt(row, startCol, '이중주차 시뮬레이터', asText: true);
-    row++;
-    xlsx.writeAt(row, startCol, '전체 입고 순서', asText: true);
-    xlsx.writeAt(row, startCol + 1, result.globalInboundGuide, asText: true);
-    row++;
-    xlsx.writeAt(row, startCol, '옥동 일반4', asText: true);
-    xlsx.writeAt(row, startCol + 1, result.okdongSummary.normalIds.join(', '),
-        asText: true);
-    row++;
-    xlsx.writeAt(row, startCol, '옥동 예비1', asText: true);
-    xlsx.writeAt(row, startCol + 1, result.okdongSummary.reserveId ?? '미확인',
-        asText: true);
-    row++;
-    xlsx.writeAt(row, startCol, '옥동 총합', asText: true);
-    xlsx.writeAt(row, startCol + 1, result.okdongSummary.allIds.join(', '),
-        asText: true);
-    row++;
+    return records.map((record) {
+      final normalized = <String, dynamic>{};
 
-    final allWarnings = <String>[
-      ...result.warnings,
-      ...result.lines.expand((l) => l.warnings),
+      for (final key in kAllHeaders) {
+        final raw = record.values[key];
+        final expectedType = typeByKey[key] ?? 'bool';
+        switch (expectedType) {
+          case 'number':
+          case 'percent':
+          case 'code':
+            normalized[key] = _parseNumber(raw);
+            break;
+          case 'bool':
+          default:
+            normalized[key] = _parseBool(raw) ? 1 : 0;
+            break;
+        }
+      }
+
+      final normalizedNextSta = normalizeStationCode(normalized['NEXTSTA']);
+      normalized['TIME'] = record.time;
+      normalized['NUM'] = record.index;
+      normalized['NEXTSTA_NORM'] = normalizedNextSta ?? 0;
+
+      return LogRecord(
+        index: record.index,
+        time: record.time,
+        values: normalized,
+      );
+    }).toList(growable: false);
+  }
+
+  List<DiagnosticFinding> analyze(List<LogRecord> records) {
+    final findings = <DiagnosticFinding>[];
+    final context = AnalyzerContext();
+
+    for (var i = 0; i < records.length; i++) {
+      final curr = records[i];
+      final prev = i > 0 ? records[i - 1] : null;
+      final state = determineState(curr);
+
+      findings.addAll(
+        detectSignalTransitions(
+          curr: curr,
+          prev: prev,
+          state: state,
+          context: context,
+        ),
+      );
+
+      findings.addAll(
+        applyDiagnosticRules(
+          curr: curr,
+          prev: prev,
+          state: state,
+          context: context,
+        ),
+      );
+    }
+
+    findings.sort((a, b) => a.recordIndex.compareTo(b.recordIndex));
+    return _compactFindings(findings);
+  }
+
+  TrainState determineState(LogRecord r) {
+    final vel = r.numberValue('VEL').abs();
+
+    if (r.boolValue('TCMS-EMTRIP') ||
+        !r.boolValue('EB loop') ||
+        !r.boolValue('EBR')) {
+      return TrainState.emergency;
+    }
+    if (r.boolValue('ATC1/2FSBR') || r.boolValue('ATC EB')) {
+      return TrainState.forcedBraking;
+    }
+    if (r.boolValue('TCMS-INBITD') || r.boolValue('ATO INBITD')) {
+      return TrainState.inhibited;
+    }
+    if ((r.boolValue('FOR') || r.boolValue('REV')) &&
+        (!r.boolValue('HCR') || !r.boolValue('TCMS-CAB ACT'))) {
+      return TrainState.controlPending;
+    }
+    if (vel <= kStopSpeedThreshold &&
+        (r.boolValue('CLOSE') || r.boolValue('S_CLOSE')) &&
+        !r.boolValue('ADC')) {
+      return TrainState.doorClosing;
+    }
+    if (vel <= kStopSpeedThreshold && !r.boolValue('ADC')) {
+      return TrainState.doorOpen;
+    }
+    if (vel <= kStopSpeedThreshold &&
+        r.boolValue('ADC') &&
+        r.boolValue('ATC1/2DPT-PM') &&
+        !r.boolValue('TCMS-INBITD') &&
+        !r.boolValue('ATO INBITD')) {
+      return TrainState.readyToDepart;
+    }
+    if ((r.boolValue('ATC1/2DptBP') ||
+            r.numberValue('ATO P/B COM') > kPbActiveThreshold ||
+            r.numberValue('P/B') > kPbActiveThreshold) &&
+        vel <= kMoveSpeedThreshold &&
+        r.boolValue('ADC')) {
+      return TrainState.departureCommand;
+    }
+    if (vel > kStopSpeedThreshold &&
+        r.numberValue('P/B') < -kPbActiveThreshold &&
+        !r.boolValue('ATC1/2FSBR')) {
+      return TrainState.braking;
+    }
+    if (vel > kMoveSpeedThreshold && !r.boolValue('ATC1/2FSBR')) {
+      return TrainState.running;
+    }
+    if (vel <= kStopSpeedThreshold && r.boolValue('ADC')) {
+      return TrainState.berthed;
+    }
+    return TrainState.inactive;
+  }
+
+  OperationMode determineOperationMode(LogRecord r) {
+    if (r.boolValue('EMEGR')) {
+      return OperationMode.emergencyRescue;
+    }
+    if (r.boolValue('EMERG')) {
+      return OperationMode.emergency;
+    }
+    if (r.boolValue('YARD')) {
+      return OperationMode.yard;
+    }
+    if (r.boolValue('AUTO')) {
+      return OperationMode.auto;
+    }
+    if (r.boolValue('MANUAL')) {
+      return OperationMode.manual;
+    }
+    return OperationMode.unknown;
+  }
+
+  String modeTransitionMessage(OperationMode prevMode, OperationMode currMode) {
+    if (prevMode == OperationMode.auto && currMode == OperationMode.manual) {
+      return '자동운전이 해제되고 수동운전으로 전환되었습니다.';
+    }
+    if (prevMode == OperationMode.manual && currMode == OperationMode.auto) {
+      return '수동운전에서 자동운전으로 전환되었습니다.';
+    }
+    if (currMode == OperationMode.emergency) {
+      return '비상운전 모드로 전환되었습니다.';
+    }
+    if (currMode == OperationMode.emergencyRescue) {
+      return '비상구원운전 모드가 활성화되었습니다.';
+    }
+    if (currMode == OperationMode.yard) {
+      return '기지운전 모드로 전환되었습니다.';
+    }
+    return '운전모드가 ${operationModeLabel(prevMode)}에서 ${operationModeLabel(currMode)}로 전환되었습니다.';
+  }
+
+  List<DiagnosticFinding> detectSignalTransitions({
+    required LogRecord curr,
+    required LogRecord? prev,
+    required TrainState state,
+    required AnalyzerContext context,
+  }) {
+    final out = <DiagnosticFinding>[];
+    final vel = curr.numberValue('VEL').abs();
+    final adcHighStreak =
+        context.bump('transition_adc_high_streak', curr.boolValue('ADC'));
+    final adcLowStreak =
+        context.bump('transition_adc_low_streak', !curr.boolValue('ADC'));
+    final fsbrEventStreak = context.bump(
+      'transition_fsbr_streak',
+      curr.boolValue('ATC1/2FSBR'),
+    );
+    final emergModeStreak = context.bump(
+      'transition_emerg_mode_streak',
+      curr.boolValue('EMERG') || curr.boolValue('EMEGR'),
+    );
+    final adbsStreak =
+        context.bump('transition_adbs_streak', curr.boolValue('ADBS'));
+    _updateBerthStationMemory(curr, context);
+
+    if (prev != null) {
+      final prevMode = determineOperationMode(prev);
+      final currMode = determineOperationMode(curr);
+      if (prevMode != OperationMode.unknown &&
+          currMode != OperationMode.unknown &&
+          prevMode != currMode) {
+        context.memory['LAST_MODE_CHANGE_INDEX'] = '${curr.index}';
+        context.memory['LAST_MODE_CHANGE_FROM'] = operationModeLabel(prevMode);
+        context.memory['LAST_MODE_CHANGE_TO'] = operationModeLabel(currMode);
+        out.add(
+          _finding(
+            code: 'EVT-MODE-CHANGE',
+            type: EntryType.mode,
+            state: state,
+            curr: curr,
+            message: _withLocation(
+              curr,
+              prev,
+              modeTransitionMessage(prevMode, currMode),
+            ),
+            signals: const ['AUTO', 'MANUAL', 'EMERG', 'EMEGR', 'YARD'],
+          ),
+        );
+      }
+      if (vel > kStopSpeedThreshold && emergModeStreak == kSignalDebounceSec) {
+        out.add(
+          _finding(
+            code: 'EVT-EMERG-RUN',
+            type: EntryType.critical,
+            state: state,
+            curr: curr,
+            message: _withLocation(curr, prev, '주행 중 비상운전 계열 모드로 전환되었습니다.'),
+            signals: const ['VEL', 'EMERG', 'EMEGR'],
+          ),
+        );
+      }
+      if (adcLowStreak == kSignalDebounceSec) {
+        out.add(
+          _finding(
+            code: 'EVT-ADC-OPEN',
+            type: EntryType.door,
+            state: state,
+            curr: curr,
+            message: 'ADC가 1→0으로 전환되어 출입문 열림 상태가 감지되었습니다.',
+            signals: const ['ADC'],
+          ),
+        );
+      }
+      if (adcHighStreak == kSignalDebounceSec) {
+        out.add(
+          _finding(
+            code: 'EVT-ADC-CLOSE',
+            type: EntryType.door,
+            state: state,
+            curr: curr,
+            message: 'ADC가 0→1로 전환되어 전차 출입문 닫힘(완폐) 상태가 형성되었습니다.',
+            signals: const ['ADC'],
+          ),
+        );
+      }
+      if (wasRising(prev, curr, 'ATC1/2DPT-PM')) {
+        final currentStation = context.memory['LAST_BERTHED_STATION_NAME'];
+        final nextStation = stationDisplayName(normalizedNextSta(curr));
+        final dptMessage = (currentStation != null && currentStation.isNotEmpty)
+            ? '$currentStation 정차 중 출발 허가(DPT-PM)가 형성되었습니다.'
+                '${(nextStation != null && nextStation != currentStation) ? ' 다음역은 $nextStation입니다.' : ''}'
+            : _appendStation(
+                curr,
+                'ATC 출발 허가(DPT-PM)가 형성되었습니다.',
+                prev: prev,
+              );
+        out.add(
+          _finding(
+            code: 'EVT-DPT',
+            type: EntryType.atc,
+            state: state,
+            curr: curr,
+            message: dptMessage,
+            signals: const ['ATC1/2DPT-PM', 'ADC', 'VEL'],
+          ),
+        );
+      }
+      if (fsbrEventStreak == kFsbrSustainSec) {
+        out.add(
+          _finding(
+            code: 'EVT-FSBR',
+            type: EntryType.brake,
+            state: state,
+            curr: curr,
+            message: '전상용제동(FSBR)이 체결되었습니다.',
+            signals: const ['ATC1/2FSBR', 'VEL'],
+          ),
+        );
+      }
+      if (adbsStreak == kSignalDebounceSec) {
+        out.add(
+          _finding(
+            code: 'EVT-ADBS',
+            type: EntryType.warning,
+            state: state,
+            curr: curr,
+            message: '출입문 바이패스(ADBS) 취급이 감지되었습니다. 안전 확인이 필요한 상태로 해석됩니다.',
+            signals: const ['ADBS', 'ADC'],
+          ),
+        );
+      }
+      if (wasRising(prev, curr, 'FOR') && !curr.boolValue('HCR')) {
+        out.add(
+          _finding(
+            code: 'EVT-CTRL',
+            type: EntryType.warning,
+            state: state,
+            curr: curr,
+            message: '전진 지령(FOR) 투입 후에도 HCR=0으로 제어권 형성이 되지 않았습니다.',
+            signals: const ['FOR', 'HCR', 'TCMS-CAB ACT'],
+          ),
+        );
+      }
+      if (wasRising(prev, curr, 'DRIVL')) {
+        out.add(
+          _finding(
+            code: 'EVT-DRIVL',
+            type: EntryType.mode,
+            state: state,
+            curr: curr,
+            message: _appendStation(curr, '무인운전 모드(DRIVL)가 활성화되었습니다.', prev: prev),
+            signals: const ['DRIVL', 'AUTO', 'MANUAL'],
+          ),
+        );
+      }
+      if (wasRising(prev, curr, 'FOR WAR')) {
+        out.add(
+          _finding(
+            code: 'EVT-FORWAR',
+            type: EntryType.atc,
+            state: state,
+            curr: curr,
+            message: _appendStation(curr, '전방 예고 신호(FOR WAR)가 감지되었습니다.', prev: prev),
+            signals: const ['FOR WAR', 'VEL'],
+          ),
+        );
+      }
+      if (wasRising(prev, curr, 'PBR')) {
+        out.add(
+          _finding(
+            code: 'EVT-PBR',
+            type: EntryType.brake,
+            state: state,
+            curr: curr,
+            message: _appendStation(curr, '추진/제동 요청(PBR) 신호가 감지되었습니다.', prev: prev),
+            signals: const ['PBR', 'P/B', 'VEL'],
+          ),
+        );
+      }
+      if (wasRising(prev, curr, 'PAN UP')) {
+        final type =
+            curr.boolValue('EMEGR') ? EntryType.warning : EntryType.mode;
+        final message = curr.boolValue('EMEGR')
+            ? '비상구원운전 상태에서 판토 상승 버튼 취급이 감지되었습니다.'
+            : '판토 상승 버튼 취급이 감지되었습니다.';
+        out.add(
+          _finding(
+            code: 'EVT-PAN-UP',
+            type: type,
+            state: state,
+            curr: curr,
+            message: _appendStation(curr, message, prev: prev),
+            signals: const ['PAN UP', 'EMEGR', 'VEL'],
+          ),
+        );
+      }
+      if (wasRising(prev, curr, 'PAN DN')) {
+        final type = (curr.boolValue('EMEGR') || vel > kStopSpeedThreshold)
+            ? EntryType.warning
+            : EntryType.mode;
+        final message = curr.boolValue('EMEGR')
+            ? '비상구원운전 상태에서 판토 하강 버튼 취급이 감지되었습니다.'
+            : '판토 하강 버튼 취급이 감지되었습니다.';
+        out.add(
+          _finding(
+            code: 'EVT-PAN-DN',
+            type: type,
+            state: state,
+            curr: curr,
+            message: _appendStation(curr, message, prev: prev),
+            signals: const ['PAN DN', 'EMEGR', 'VEL'],
+          ),
+        );
+      }
+      if (prev.numberValue('VEL').abs() > kStopSpeedThreshold &&
+          vel <= kStopSpeedThreshold) {
+        final currentStation = context.memory['LAST_BERTHED_STATION_NAME'];
+        final nextStation = stationDisplayName(normalizedNextSta(curr));
+        final stopMessage = (currentStation != null && currentStation.isNotEmpty)
+            ? '$currentStation 정차 상태로 전환되었습니다.'
+                '${(nextStation != null && nextStation != currentStation) ? ' 다음역은 $nextStation입니다.' : ''}'
+            : _appendStation(curr, '열차가 정차 상태로 전환되었습니다.', prev: prev);
+        out.add(
+          _finding(
+            code: 'EVT-STOP',
+            type: EntryType.info,
+            state: state,
+            curr: curr,
+            message: stopMessage,
+            signals: const ['VEL', 'NEXTSTA'],
+          ),
+        );
+      }
+      if (prev.numberValue('VEL').abs() <= kStopSpeedThreshold &&
+          vel > kStopSpeedThreshold) {
+        final departedStation = context.memory['LAST_BERTHED_STATION_NAME'];
+        if (departedStation != null && departedStation.isNotEmpty) {
+          context.memory['LAST_DEPARTED_STATION_NAME'] = departedStation;
+          context.memory['LAST_DEPARTED_STATION_CODE'] =
+              context.memory['LAST_BERTHED_STATION_CODE'] ?? '';
+        }
+        final nextStation = stationDisplayName(normalizedNextSta(curr));
+        final moveMessage = (departedStation != null && departedStation.isNotEmpty)
+            ? '$departedStation 발차 후'
+                '${(nextStation != null && nextStation != departedStation) ? ' $nextStation 방면으로' : ''}'
+                ' 이동 상태로 전환되었습니다.'
+            : _appendStation(
+                curr,
+                '열차가 정차 상태에서 이동 상태로 전환되었습니다.',
+                prev: prev,
+              );
+        out.add(
+          _finding(
+            code: 'EVT-MOVE',
+            type: EntryType.mode,
+            state: state,
+            curr: curr,
+            message: moveMessage,
+            signals: const ['VEL', 'NEXTSTA'],
+          ),
+        );
+      }
+      final currNextSta = normalizedNextSta(curr);
+      final prevNextSta = normalizedNextSta(prev);
+      if (currNextSta != null &&
+          prevNextSta != null &&
+          currNextSta != prevNextSta) {
+        final prevStation = stationDisplayName(prevNextSta) ?? '미확인';
+        final currStation = stationDisplayName(currNextSta) ?? '미확인';
+        final dir = inferLineDirection(prev: prev, curr: curr);
+        final dirText = dir == null ? '' : ' / $dir';
+        final location = formatLocationText(curr, prev: prev);
+        final isOperational = _isOperationalStationCode(currNextSta);
+        out.add(
+          _finding(
+            code: 'EVT-NEXTSTA',
+            type: EntryType.info,
+            state: state,
+            curr: curr,
+            message: isOperational
+                ? '$location에서 다음역 정보가 $prevStation에서 $currStation($currNextSta)으로 전환되었습니다.$dirText'
+                : '$location에서 다음역 정보가 $prevStation에서 $currStation으로 갱신되었습니다.$dirText',
+            signals: const ['NEXTSTA', 'DIST'],
+          ),
+        );
+      }
+    }
+
+    for (final button in const ['OPEN-L', 'OPEN-R', 'CLOSE', 'REOPEN']) {
+      if (prev != null && wasRising(prev, curr, button)) {
+        out.add(
+          _finding(
+            code: 'EVT-$button',
+            type: EntryType.door,
+            state: state,
+            curr: curr,
+            message: '$button 버튼 입력이 감지되었습니다.',
+            signals: [button, 'ADC'],
+          ),
+        );
+      }
+    }
+
+    final stopCount =
+        context.bump('transition_stop_streak', vel <= kStopSpeedThreshold);
+    if (stopCount >= kDoorCloseDelaySec) {
+      context.flags['departure_armed'] = true;
+    }
+    if (vel <= kStopSpeedThreshold) {
+      context.bump('transition_speed5_streak', false);
+    }
+
+    if (context.flags['departure_armed'] == true) {
+      final speed5 =
+          context.bump('transition_speed5_streak', vel >= kMoveSpeedThreshold);
+      if (speed5 == kDepartureConfirmSec) {
+        out.add(
+          _finding(
+            code: 'EVT-DEPART',
+            type: EntryType.mode,
+            state: state,
+            curr: curr,
+            message: _appendStation(
+              curr,
+              '속도 ${kMoveSpeedThreshold.toStringAsFixed(0)}km/h 이상이 ${kDepartureConfirmSec}초 지속되어 발차가 확정되었습니다.',
+              prev: prev,
+            ),
+            signals: const ['VEL', 'ATC1/2DptBP', 'ATO P/B COM', 'P/B'],
+          ),
+        );
+        context.flags['departure_armed'] = false;
+        context.bump('transition_speed5_streak', false);
+      }
+    }
+
+    return out;
+  }
+
+  List<DiagnosticFinding> applyDiagnosticRules({
+    required LogRecord curr,
+    required LogRecord? prev,
+    required TrainState state,
+    required AnalyzerContext context,
+  }) {
+    final findings = <DiagnosticFinding>[];
+
+    final vel = curr.numberValue('VEL').abs();
+    final pb = curr.numberValue('P/B');
+    final atoPb = curr.numberValue('ATO P/B COM');
+    final adc = curr.boolValue('ADC');
+    final noCode = isNoCode(curr);
+    final fsbr = curr.boolValue('ATC1/2FSBR');
+    final fsbrStreak = context.bump('diag_fsbr_streak', fsbr);
+    final fsbrSustained = fsbrStreak >= kFsbrSustainSec;
+    final fsbrSustainedRise = fsbrStreak == kFsbrSustainSec;
+    final nCodeStreak = context.bump('NCodeStreak', noCode);
+    final nCodeNoFsbrStreak =
+        context.bump('NCodeNoFsbrStreak', noCode && !fsbrSustained);
+    final activeSpeedCode = getActiveAtcSpeedCode(curr);
+    final unclosedDoorCarsNow = _unclosedDoorCars(curr);
+    final isDoorClosingWindow =
+        vel <= kStopSpeedThreshold &&
+        (curr.boolValue('CLOSE') || curr.boolValue('S_CLOSE')) &&
+        !adc;
+
+    // D1. 출발 불능
+    final hasDepartureCommand =
+        curr.boolValue('ATC1/2DptBP') ||
+        atoPb > kPbActiveThreshold ||
+        pb > kPbActiveThreshold;
+    final d1Condition = (state == TrainState.readyToDepart ||
+            state == TrainState.departureCommand ||
+            state == TrainState.inhibited ||
+            state == TrainState.controlPending) &&
+        adc &&
+        vel <= kStopSpeedThreshold &&
+        hasDepartureCommand;
+    final d1Count = context.bump('D1', d1Condition);
+    if (d1Count == kDepartureFailureWarnSec) {
+      String message;
+      String checkPoint =
+          'ATC1/2DPT-PM, TCMS-INBITD, HCR, TCMS-CAB ACT, ATO NMID';
+      if (!curr.boolValue('ATC1/2DPT-PM')) {
+        message = '발차 조작이 있었으나 출발 허가가 형성되지 않았습니다.';
+        checkPoint = 'ATC1/2DPT-PM, ATC ON';
+      } else if (curr.boolValue('TCMS-INBITD') ||
+          curr.boolValue('ATO INBITD')) {
+        message = '운행금지 신호로 인해 발차가 억제되고 있습니다.';
+        checkPoint = 'TCMS-INBITD, ATO INBITD';
+      } else if (!curr.boolValue('HCR') || !curr.boolValue('TCMS-CAB ACT')) {
+        message = '발차 조건은 있으나 제어권이 형성되지 않았습니다.';
+        checkPoint = 'HCR, TCMS-CAB ACT, ATC ON';
+      } else if (curr.boolValue('ATO NMID')) {
+        message = '동력 투입 후에도 열차 움직임이 검출되지 않았습니다.';
+        checkPoint = 'ATO NMID, ATO P/B COM, VEL';
+      } else {
+        message = '발차 조작이 있었으나 열차가 움직이지 않았습니다.';
+      }
+
+      findings.add(
+        _finding(
+          code: 'D1',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _appendStation(curr, message, prev: prev),
+          signals: const [
+            'ADC',
+            'VEL',
+            'P/B',
+            'ATC1/2DptBP',
+            'ATC1/2DPT-PM',
+            'HCR',
+            'TCMS-CAB ACT',
+            'TCMS-INBITD',
+            'ATO INBITD',
+            'ATO NMID',
+          ],
+          checkPoint: checkPoint,
+        ),
+      );
+    }
+
+    // D2. 출입문 미완폐
+    final d2Condition = isDoorClosingWindow;
+    final d2Count = context.bump('D2', d2Condition);
+    if (d2Count == kDoorCloseDelaySec) {
+      final unclosedCars = unclosedDoorCarsNow;
+      final carText =
+          unclosedCars.isEmpty ? '호차 정보 미확인' : '${unclosedCars.join(", ")}호차';
+      findings.add(
+        _finding(
+          code: 'D2',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '$carText 출입문 닫힘 상태가 형성되지 않았습니다.',
+          ),
+          signals: const [
+            'CLOSE',
+            'S_CLOSE',
+            'ADC',
+            'DOOR0',
+            'DOOR1',
+            'DOOR2',
+            'DOOR7'
+          ],
+          checkPoint: 'DOOR0, DOOR1, DOOR2, DOOR7, ADC',
+        ),
+      );
+    }
+
+    // D3. 제어권 형성 실패
+    final d3Condition = state == TrainState.controlPending &&
+        (curr.boolValue('FOR') || curr.boolValue('REV')) &&
+        (!curr.boolValue('HCR') || !curr.boolValue('TCMS-CAB ACT'));
+    final d3Count = context.bump('D3', d3Condition);
+    if (d3Count == kControlPendingWarnSec) {
+      findings.add(
+        _finding(
+          code: 'D3',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '역전기 투입 후에도 활성 운전실이 형성되지 않았습니다.',
+          ),
+          signals: const ['FOR', 'REV', 'HCR', 'TCMS-CAB ACT', 'ATC ON'],
+          checkPoint: 'HCR, TCMS-CAB ACT, ATC ON',
+        ),
+      );
+    }
+
+    // D4. 무코드 지속(2~3초 이상) + FSB
+    final d4Condition =
+        noCode && fsbrSustained && nCodeStreak >= kNoCodeFsbrMinSec;
+    final d4Count = context.bump('D4', d4Condition);
+    if (d4Count == 1) {
+      findings.add(
+        _finding(
+          code: 'D4',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '무코드가 약 ${nCodeStreak}초 지속된 뒤 전상용제동이 체결되었습니다.',
+          ),
+          signals: const ['ATC1/2NCode', 'ATC1/2FSBR', 'VEL'],
+          checkPoint: 'ATC1/2NCode, ATC1/2FSBR',
+        ),
+      );
+      context.memory['LAST_FSB_EXPLAINED_INDEX'] = '${curr.index}';
+    }
+    if (nCodeStreak == kNoCodeCriticalSec) {
+      findings.add(
+        _finding(
+          code: 'D4',
+          type: EntryType.critical,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '무코드 상태가 ${kNoCodeCriticalSec}초 이상 지속되고 있습니다.',
+          ),
+          signals: const ['ATC1/2NCode', 'ATC1/2FSBR', 'VEL'],
+          checkPoint: 'ATC1/2NCode, ATC1/2FSBR',
+        ),
+      );
+    }
+
+    // D5. 과속으로 인한 FSB
+    final d5Condition = fsbrSustained &&
+        !noCode &&
+        activeSpeedCode != null &&
+        vel > activeSpeedCode + 2;
+    final d5Count = context.bump('D5', d5Condition);
+    if (d5Count == 1) {
+      findings.add(
+        _finding(
+          code: 'D5',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '실제 속도(${vel.toStringAsFixed(1)}km/h)가 허용 속도($activeSpeedCode)를 초과하여 전상용제동이 체결되었습니다.',
+          ),
+          signals: const [
+            'ATC1/2FSBR',
+            'VEL',
+            'ATC1/2NCode',
+            'ATC1/2 0',
+            'ATC1/2 15',
+            'ATC1/2 25',
+            'ATC1/2 30',
+            'ATC1/2 35',
+            'ATC1/2 40',
+            'ATC1/2 45',
+            'ATC1/2 50',
+            'ATC1/2 55',
+            'ATC1/2 60',
+            'ATC1/2 65',
+            'ATC1/2 70',
+            'ATC1/2 75',
+            'ATC1/2 80'
+          ],
+          checkPoint: 'VEL, ATC Speed Code',
+        ),
+      );
+      context.memory['LAST_FSB_EXPLAINED_INDEX'] = '${curr.index}';
+    }
+
+    // D16. 무코드 지속 대비 FSBR 미체결(요약 알림)
+    if (nCodeNoFsbrStreak == kNoCodeNoFsbrWarnSec ||
+        (nCodeNoFsbrStreak >= kNoCodeNoFsbrSummaryEverySec &&
+            nCodeNoFsbrStreak % kNoCodeNoFsbrSummaryEverySec == 0)) {
+      final message = nCodeNoFsbrStreak == kNoCodeNoFsbrWarnSec
+          ? '무코드가 ${kNoCodeNoFsbrWarnSec}초 이상 지속되었으나 전상용제동이 아직 체결되지 않았습니다.'
+          : '무코드 대비 전상용제동 미체결 상태가 ${nCodeNoFsbrStreak}초 지속되고 있습니다.';
+      findings.add(
+        _finding(
+          code: 'D16',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _withLocation(curr, prev, message),
+          signals: const ['ATC1/2NCode', 'ATC1/2FSBR', 'VEL'],
+          checkPoint: 'ATC1/2NCode, ATC1/2FSBR',
+        ),
+      );
+    }
+
+    // D15. FSB 원인 보조 해석 (중립 기록 + 주변 신호 분기)
+    final lastD15Index = int.tryParse(context.memory['LAST_D15_INDEX'] ?? '');
+    final d15Cooldown = lastD15Index != null &&
+        (curr.index - lastD15Index).abs() <= kD15CooldownSec;
+    final lastFsbrExplainedIndex =
+        int.tryParse(context.memory['LAST_FSB_EXPLAINED_INDEX'] ?? '');
+    final fsbrExplainedRecently = lastFsbrExplainedIndex != null &&
+        (curr.index - lastFsbrExplainedIndex).abs() <=
+            kRecentFsbrExplainedSec;
+    final lastModeChangeIndex =
+        int.tryParse(context.memory['LAST_MODE_CHANGE_INDEX'] ?? '');
+    final hasRecentModeChange = lastModeChangeIndex != null &&
+        (curr.index - lastModeChangeIndex).abs() <= kRecentModeChangeSec;
+    final doorInterlockRelated =
+        vel > kStopSpeedThreshold &&
+        !adc &&
+        unclosedDoorCarsNow.isNotEmpty;
+    final hasContext = hasRecentModeChange || doorInterlockRelated;
+
+    if (fsbrSustainedRise &&
+        !d4Condition &&
+        !d5Condition &&
+        !d15Cooldown &&
+        !fsbrExplainedRecently &&
+        hasContext) {
+      if (doorInterlockRelated) {
+        final message = _withLocation(
+          curr,
+          prev,
+          '출입문 인터록 변화와 연계되어 전상용제동이 체결된 것으로 해석됩니다.',
+        );
+        const signals = <String>[
+          'ATC1/2FSBR',
+          'ADC',
+          'DOOR0',
+          'DOOR1',
+          'DOOR2',
+          'DOOR7',
+        ];
+        const checkPoint = 'ADC, 유효 호차 DOOR(0/1/2/7)';
+        findings.add(
+          _finding(
+            code: 'D15',
+            type: EntryType.warning,
+            state: state,
+            curr: curr,
+            message: message,
+            signals: signals,
+            checkPoint: checkPoint,
+          ),
+        );
+        context.memory['LAST_D15_INDEX'] = '${curr.index}';
+      } else if (hasRecentModeChange) {
+        final modeFrom = context.memory['LAST_MODE_CHANGE_FROM'] ?? '미확인';
+        final modeTo = context.memory['LAST_MODE_CHANGE_TO'] ?? '미확인';
+        final message = _withLocation(
+          curr,
+          prev,
+          '주행 중 운전모드가 ${modeFrom}에서 ${modeTo}로 변경된 이후 전상용제동이 체결되었습니다.',
+        );
+        const signals = <String>[
+          'ATC1/2FSBR',
+          'AUTO',
+          'MANUAL',
+          'EMERG',
+          'EMEGR'
+        ];
+        const checkPoint = '운전모드 전환 시점, FSBR 체결 시점';
+        findings.add(
+          _finding(
+            code: 'D15',
+            type: EntryType.warning,
+            state: state,
+            curr: curr,
+            message: message,
+            signals: signals,
+            checkPoint: checkPoint,
+          ),
+        );
+        context.memory['LAST_D15_INDEX'] = '${curr.index}';
+      }
+    }
+
+    // D6. ATO 움직임 미검출
+    final d6Condition = curr.boolValue('AUTO') &&
+        atoPb > kPbActiveThreshold &&
+        vel <= kStopSpeedThreshold &&
+        curr.boolValue('ATO NMID');
+    final d6Count = context.bump('D6', d6Condition);
+    if (d6Count == kDepartureFailureWarnSec) {
+      findings.add(
+        _finding(
+          code: 'D6',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _appendStation(
+            curr,
+            '자동운전 명령 이후에도 열차 움직임이 검출되지 않았습니다.',
+            prev: prev,
+          ),
+          signals: const [
+            'AUTO',
+            'ATO P/B COM',
+            'ATO NMID',
+            'VEL',
+            'TCMS-INBITD',
+            'ATO INBITD'
+          ],
+          checkPoint: 'ATO NMID, ATO P/B COM, VEL',
+        ),
+      );
+    }
+
+    // D7. 운행금지 활성
+    final d7Condition =
+        curr.boolValue('TCMS-INBITD') || curr.boolValue('ATO INBITD');
+    final d7Count = context.bump('D7', d7Condition);
+    if (d7Count == kSignalDebounceSec) {
+      findings.add(
+        _finding(
+          code: 'D7',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message:
+              _withLocation(curr, prev, '운행금지 신호가 활성화되어 열차 출발이 억제되고 있습니다.'),
+          signals: const ['TCMS-INBITD', 'ATO INBITD', 'ADC', 'ATC1/2DPT-PM'],
+          checkPoint: 'TCMS-INBITD, ATO INBITD',
+        ),
+      );
+    }
+    if (d7Count == kInhibitWarnSec) {
+      findings.add(
+        _finding(
+          code: 'D7',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '운행금지 상태가 ${kInhibitWarnSec}초 이상 지속되고 있습니다.',
+          ),
+          signals: const ['TCMS-INBITD', 'ATO INBITD', 'ADC', 'ATC1/2DPT-PM'],
+          checkPoint: 'TCMS-INBITD, ATO INBITD',
+        ),
+      );
+    }
+
+    // D8. 비상루프/EB 이상
+    final d8Condition = !curr.boolValue('EB loop') || !curr.boolValue('EBR');
+    final d8Count = context.bump('D8', d8Condition);
+    if (d8Count == kSignalDebounceSec) {
+      final hasCutout = curr.boolValue('EBCOS');
+      final hasEmTrip = curr.boolValue('TCMS-EMTRIP');
+      final extra = <String>[];
+      if (hasCutout) {
+        extra.add('EBCOS 차단 스위치 취급 상태');
+      }
+      if (hasEmTrip) {
+        extra.add('TCMS 비상차단 연계');
+      }
+      final suffix = extra.isEmpty ? '' : ' (${extra.join(", ")})';
+
+      findings.add(
+        _finding(
+          code: 'D8',
+          type: EntryType.critical,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '비상제동 안전루프 이상이 감지되었습니다.$suffix',
+          ),
+          signals: const ['EB loop', 'EBR', 'EBCOS', 'TCMS-EMTRIP'],
+          checkPoint: 'EB loop, EBR, EBCOS',
+        ),
+      );
+    }
+
+    // D9. 바이패스 경고
+    final d9Condition = curr.boolValue('ADBS') || curr.boolValue('EBCOS');
+    final d9Count = context.bump('D9', d9Condition);
+    if (d9Count == kSignalDebounceSec) {
+      final reasons = <String>[];
+      if (curr.boolValue('ADBS')) {
+        reasons.add('출입문 바이패스');
+      }
+      if (curr.boolValue('EBCOS')) {
+        reasons.add('비상제동 차단 스위치');
+      }
+
+      findings.add(
+        _finding(
+          code: 'D9',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '안전회로 바이패스 취급이 감지되었습니다. (${reasons.join(" / ")})',
+          ),
+          signals: const ['ADBS', 'EBCOS', 'ADC', 'EB loop'],
+          checkPoint: 'ADBS, EBCOS',
+        ),
+      );
+    }
+
+    // D10. 신호 불일치
+    final mismatchMessages = <String>[];
+    final mismatchSignals = <String>{};
+
+    if (adc) {
+      final unclosed = unclosedDoorCarsNow;
+      if (unclosed.isNotEmpty) {
+        mismatchMessages
+            .add('ADC=1인데 유효 호차(${unclosed.join(", ")}) DOOR 비트가 0입니다');
+        mismatchSignals.add('ADC');
+        mismatchSignals.addAll(
+          unclosed.map((c) => c == 0 ? 'DOOR0' : 'DOOR$c'),
+        );
+      }
+    }
+
+    if (prev != null &&
+        wasRising(prev, curr, 'OPEN-L') &&
+        !curr.boolValue('ATC1/2EDL')) {
+      mismatchMessages.add('OPEN-L 입력이 있으나 EDL=0');
+      mismatchSignals.addAll(const ['OPEN-L', 'ATC1/2EDL']);
+    }
+
+    if (prev != null &&
+        wasRising(prev, curr, 'OPEN-R') &&
+        !curr.boolValue('ATC1/2EDR')) {
+      mismatchMessages.add('OPEN-R 입력이 있으나 EDR=0');
+      mismatchSignals.addAll(const ['OPEN-R', 'ATC1/2EDR']);
+    }
+
+    final activeModes = <String>[
+      if (curr.boolValue('EMEGR')) 'EMEGR',
+      if (curr.boolValue('EMERG')) 'EMERG',
+      if (curr.boolValue('YARD')) 'YARD',
+      if (curr.boolValue('AUTO')) 'AUTO',
+      if (curr.boolValue('MANUAL')) 'MANUAL',
     ];
-    if (allWarnings.isNotEmpty) {
-      xlsx.writeAt(row, startCol, '경고', asText: true);
-      xlsx.writeAt(row, startCol + 1, allWarnings.join(' | '), asText: true);
-      row++;
+    if (activeModes.length >= 2) {
+      mismatchMessages.add('복수의 운전모드 신호가 동시에 감지되었습니다');
+      mismatchSignals.addAll(activeModes);
     }
 
-    row++;
-    xlsx.writeAt(row, startCol, '선로', asText: true);
-    xlsx.writeAt(row, startCol + 1, '명일 OUT', asText: true);
-    xlsx.writeAt(row, startCol + 2, '금일 IN', asText: true);
-    xlsx.writeAt(row, startCol + 3, '선로 경고', asText: true);
-    row++;
+    if (prev != null) {
+      final pbDiff = (curr.numberValue('P/B') - prev.numberValue('P/B')).abs();
+      if (curr.boolValue('AUTO') && pbDiff >= 60) {
+        mismatchMessages.add('AUTO=1 상태에서 P/B 급변($pbDiff)');
+        mismatchSignals.addAll(const ['AUTO', 'P/B']);
+      }
+    }
 
-    for (final line in result.lines) {
-      xlsx.writeAt(row, startCol, line.lineName, asText: true);
-      xlsx.writeAt(row, startCol + 1, _entriesText(line.outbound),
-          asText: true);
-      xlsx.writeAt(row, startCol + 2, _entriesText(line.inbound), asText: true);
-      xlsx.writeAt(row, startCol + 3, line.warnings.join(' | '), asText: true);
-      row++;
+    final signature = mismatchMessages.join('|');
+    final prevSignature = context.memory['D10_SIGNATURE'] ?? '';
+    if (signature.isNotEmpty && signature != prevSignature) {
+      findings.add(
+        _finding(
+          code: 'D10',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '제어 신호 불일치가 감지되었습니다. ${mismatchMessages.join(' / ')}',
+          ),
+          signals: mismatchSignals.toList(growable: false),
+          checkPoint: '상황별 관련 신호 확인 필요',
+        ),
+      );
+    }
+    context.memory['D10_SIGNATURE'] = signature;
+
+    // D11. 비상구원운전 모드 활성
+    final d11Condition = curr.boolValue('EMEGR');
+    final d11Count = context.bump('D11', d11Condition);
+    if (d11Count == kSignalDebounceSec) {
+      findings.add(
+        _finding(
+          code: 'D11',
+          type: EntryType.critical,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '비상구원운전 모드(EMEGR)가 활성화되었습니다.',
+          ),
+          signals: const ['EMEGR', 'AUTO', 'MANUAL', 'YARD'],
+          checkPoint: 'EMEGR, 운전모드 전환 이력',
+        ),
+      );
+    }
+
+    // D13. 비상제동 버튼 취급
+    final d13Condition = curr.boolValue('EMPB');
+    final d13Count = context.bump('D13', d13Condition);
+    if (d13Count == 1) {
+      findings.add(
+        _finding(
+          code: 'D13',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '운전실 비상제동 버튼(EMPB) 취급이 감지되었습니다.',
+          ),
+          signals: const ['EMPB', 'VEL', 'ATC1/2FSBR'],
+          checkPoint: 'EMPB 취급 이력 및 제동 반응',
+        ),
+      );
+    }
+
+    // D14. 운전모드 미설정 지속
+    final d14Condition = activeModes.isEmpty;
+    final d14Count = context.bump('D14', d14Condition);
+    if (d14Count == kModeUnsetWarnSec) {
+      findings.add(
+        _finding(
+          code: 'D14',
+          type: EntryType.warning,
+          state: state,
+          curr: curr,
+          message: _withLocation(
+            curr,
+            prev,
+            '유효한 운전모드가 설정되지 않은 상태가 지속되고 있습니다.',
+          ),
+          signals: const ['EMEGR', 'EMERG', 'YARD', 'AUTO', 'MANUAL'],
+          checkPoint: '운전모드 비트 변화 이력',
+        ),
+      );
+    }
+
+    return findings;
+  }
+
+  int? getActiveAtcSpeedCode(LogRecord r) {
+    if (isNoCode(r)) {
+      return null;
+    }
+    for (final code in const <int>[
+      0,
+      15,
+      25,
+      30,
+      35,
+      40,
+      45,
+      50,
+      55,
+      60,
+      65,
+      70,
+      75,
+      80
+    ]) {
+      if (r.boolValue('ATC1/2 $code')) {
+        return code;
+      }
+    }
+    return null;
+  }
+
+  bool isNoCode(LogRecord r) {
+    return r.boolValue('ATC1/2NCode');
+  }
+
+  bool _isPassengerStationCode(int code) {
+    return (code >= 101 && code <= 119) || code == 140;
+  }
+
+  bool _isOperationalStationCode(int code) {
+    return (code >= 141 && code <= 143) || code == 150 || code == 165 || code == 166;
+  }
+
+  String? stationDisplayName(int? nextSta) {
+    final normalized = normalizeStationCode(nextSta);
+    if (normalized == null) {
+      return null;
+    }
+    final name = getStationName(normalized);
+    if (name == null || name.isEmpty) {
+      return null;
+    }
+    if (_isPassengerStationCode(normalized)) {
+      return name.endsWith('역') ? name : '$name역';
+    }
+    if (normalized >= 141 && normalized <= 143) {
+      return '시험선 구간';
+    }
+    if (normalized == 150) {
+      return '기지입고 구간';
+    }
+    if (normalized == 165) {
+      return '시운전 구간';
+    }
+    if (normalized == 166) {
+      return '회송 구간';
+    }
+    return name;
+  }
+
+  void _updateBerthStationMemory(LogRecord curr, AnalyzerContext context) {
+    final nextSta = normalizedNextSta(curr);
+    if (nextSta == null) {
+      return;
+    }
+    final vel = curr.numberValue('VEL').abs();
+    final dist = curr.numberValue('DIST').round();
+    final station = stationDisplayName(nextSta);
+    if (station == null || station.isEmpty) {
+      return;
+    }
+    if (vel <= kStopSpeedThreshold && dist <= 5) {
+      context.memory['LAST_BERTHED_STATION_CODE'] = '$nextSta';
+      context.memory['LAST_BERTHED_STATION_NAME'] = station;
     }
   }
 
-  static String _entriesText(List<DoubleParkingEntry> entries) {
-    if (entries.isEmpty) return '없음';
-    return entries
-        .map((e) => '${e.trainId}(${TimeParser.format(e.timeMins)})')
-        .join(', ');
+  int? normalizeStationCode(dynamic rawValue) {
+    final value = rawValue is num ? rawValue : _parseNumber(rawValue);
+    final code = value.round();
+    if (code <= 0) {
+      return null;
+    }
+    if (code >= 100) {
+      return code;
+    }
+    const specialCodes = <int>{40, 41, 42, 43, 50, 65, 66};
+    if ((code >= 1 && code <= 19) || specialCodes.contains(code)) {
+      return code + 100;
+    }
+    return code;
+  }
+
+  int? normalizedNextSta(LogRecord record) {
+    final cached = record.values['NEXTSTA_NORM'];
+    final cachedCode = normalizeStationCode(cached);
+    if (cachedCode != null) {
+      return cachedCode;
+    }
+    return normalizeStationCode(record.values['NEXTSTA']);
+  }
+
+  String? inferLineDirection(
+      {required LogRecord prev, required LogRecord curr}) {
+    final prevCode = normalizedNextSta(prev);
+    final currCode = normalizedNextSta(curr);
+    if (prevCode == null || currCode == null || prevCode == currCode) {
+      return null;
+    }
+    if (!_isPassengerStationCode(prevCode) || !_isPassengerStationCode(currCode)) {
+      return null;
+    }
+    if (currCode < prevCode) {
+      return '상선';
+    }
+    return '하선';
+  }
+
+  String? getStationName(int? nextSta) {
+    final normalized = normalizeStationCode(nextSta);
+    if (normalized == null) {
+      return null;
+    }
+    if (normalized >= 141 && normalized <= 143) {
+      return '시험선';
+    }
+    return kStationNames[normalized];
+  }
+
+  String formatLocationText(LogRecord curr, {LogRecord? prev}) {
+    final stationCode = normalizedNextSta(curr);
+    final stationName = stationDisplayName(stationCode);
+    final dist = curr.numberValue('DIST').round();
+
+    final base = () {
+      if (stationName == null) {
+        return dist > 0 ? '위치 미확인 (${dist}m)' : '위치 미확인';
+      }
+      if (stationCode != null && _isOperationalStationCode(stationCode)) {
+        return dist > 0 ? '$stationName (${dist}m)' : stationName;
+      }
+      if (dist <= 5) {
+        return '$stationName 접근';
+      }
+      if (dist <= 80) {
+        return '$stationName 직전 (${dist}m)';
+      }
+      if (dist <= 200) {
+        return '$stationName 진입 중 (${dist}m)';
+      }
+      return '$stationName까지 ${dist}m';
+    }();
+
+    if (prev == null) {
+      return base;
+    }
+    final direction = inferLineDirection(prev: prev, curr: curr);
+    if (direction == null) {
+      return base;
+    }
+    return '$base [$direction]';
+  }
+
+  bool wasRising(LogRecord prev, LogRecord curr, String key) {
+    return !prev.boolValue(key) && curr.boolValue(key);
+  }
+
+  bool wasFalling(LogRecord prev, LogRecord curr, String key) {
+    return prev.boolValue(key) && !curr.boolValue(key);
+  }
+
+  DiagnosticFinding _finding({
+    required String code,
+    required EntryType type,
+    required TrainState state,
+    required LogRecord curr,
+    required String message,
+    required List<String> signals,
+    String? checkPoint,
+  }) {
+    return DiagnosticFinding(
+      code: code,
+      time: curr.time,
+      state: state,
+      type: type,
+      message: message,
+      relatedSignals: signals,
+      evidence: _buildEvidence(curr, signals),
+      checkPoint: checkPoint,
+      recordIndex: curr.index,
+    );
+  }
+
+  String _withLocation(LogRecord curr, LogRecord? prev, String baseMessage) {
+    return '${formatLocationText(curr, prev: prev)}에서 $baseMessage';
+  }
+
+  String _appendStation(LogRecord r, String baseMessage, {LogRecord? prev}) {
+    return _withLocation(r, prev, baseMessage);
+  }
+
+  String _buildEvidence(LogRecord curr, List<String> signals) {
+    if (signals.isEmpty) {
+      return '-';
+    }
+    final values = signals
+        .map((key) => '$key=${_signalValueText(curr, key)}')
+        .toList(growable: false);
+    return values.join(', ');
+  }
+
+  String _signalValueText(LogRecord curr, String key) {
+    if (key == 'NEXTSTA') {
+      final code = normalizedNextSta(curr);
+      if (code == null) {
+        return '-';
+      }
+      final name = getStationName(code) ?? '미확인역';
+      return '$code($name)';
+    }
+    final value = curr.values[key];
+    if (value == null) {
+      return '-';
+    }
+    if (value is num) {
+      if (value == value.roundToDouble()) {
+        return value.toInt().toString();
+      }
+      return value.toStringAsFixed(1);
+    }
+    return value.toString();
+  }
+
+  List<DiagnosticFinding> _compactFindings(List<DiagnosticFinding> findings) {
+    if (findings.isEmpty) {
+      return findings;
+    }
+
+    final filtered = _dedupeFsbrEventAtSameIndex(findings);
+    if (filtered.isEmpty) {
+      return filtered;
+    }
+
+    final compacted = <DiagnosticFinding>[];
+    var start = filtered.first;
+    var last = filtered.first;
+    var duration = 1;
+
+    bool canMerge(DiagnosticFinding a, DiagnosticFinding b) {
+      return a.code == b.code &&
+          a.type == b.type &&
+          a.state == b.state &&
+          a.message == b.message &&
+          a.evidence == b.evidence &&
+          a.checkPoint == b.checkPoint &&
+          b.recordIndex == a.recordIndex + 1;
+    }
+
+    void flush() {
+      var message = start.message;
+      if (duration >= 3) {
+        message = '$message (${duration}초 지속)';
+      }
+      compacted.add(
+        DiagnosticFinding(
+          code: start.code,
+          time: start.time,
+          state: start.state,
+          type: start.type,
+          message: message,
+          relatedSignals: start.relatedSignals,
+          evidence: start.evidence,
+          checkPoint: start.checkPoint,
+          recordIndex: start.recordIndex,
+        ),
+      );
+    }
+
+    for (var i = 1; i < filtered.length; i++) {
+      final curr = filtered[i];
+      if (canMerge(last, curr)) {
+        duration += 1;
+        last = curr;
+        continue;
+      }
+      flush();
+      start = curr;
+      last = curr;
+      duration = 1;
+    }
+    flush();
+    return compacted;
+  }
+
+  List<DiagnosticFinding> _dedupeFsbrEventAtSameIndex(
+    List<DiagnosticFinding> findings,
+  ) {
+    final explainedAt = <int>{};
+    for (final finding in findings) {
+      if (finding.code == 'D4' || finding.code == 'D5') {
+        explainedAt.add(finding.recordIndex);
+      }
+    }
+    if (explainedAt.isEmpty) {
+      return findings;
+    }
+    return findings.where((finding) {
+      return !(finding.code == 'EVT-FSBR' &&
+          explainedAt.contains(finding.recordIndex));
+    }).toList(growable: false);
+  }
+
+  List<int> _unclosedDoorCars(LogRecord r) {
+    final cars = <int>[];
+    for (final car in kEffectiveDoorCars) {
+      final key = car == 0 ? 'DOOR0' : 'DOOR$car';
+      if (!r.boolValue(key)) {
+        cars.add(car);
+      }
+    }
+    return cars;
   }
 }
+
+class AnalyzerContext {
+  final Map<String, int> _streaks = <String, int>{};
+  final Map<String, bool> flags = <String, bool>{};
+  final Map<String, String> memory = <String, String>{};
+
+  int bump(String key, bool active) {
+    final next = active ? (_streaks[key] ?? 0) + 1 : 0;
+    _streaks[key] = next;
+    return next;
+  }
+}
+
+Future<Uint8List> _readFileAsBytes(html.File file) {
+  final completer = Completer<Uint8List>();
+  final reader = html.FileReader();
+
+  reader.onError.listen((_) {
+    if (!completer.isCompleted) {
+      completer.completeError(Exception('파일을 읽을 수 없습니다.'));
+    }
+  });
+
+  reader.onLoadEnd.listen((_) {
+    try {
+      final result = reader.result;
+      if (result is ByteBuffer) {
+        completer.complete(Uint8List.view(result));
+        return;
+      }
+      if (result is Uint8List) {
+        completer.complete(Uint8List.fromList(result));
+        return;
+      }
+      throw Exception('지원되지 않는 파일 데이터 형식입니다.');
+    } catch (e) {
+      if (!completer.isCompleted) {
+        completer.completeError(e);
+      }
+    }
+  });
+
+  reader.readAsArrayBuffer(file);
+  return completer.future;
+}
+
+List<Map<String, dynamic>> parseXlsxRows(Uint8List bytes) {
+  final excel = ex.Excel.decodeBytes(bytes);
+  if (excel.tables.isEmpty) {
+    return const <Map<String, dynamic>>[];
+  }
+
+  final firstSheetName = excel.tables.keys.first;
+  final sheet = excel.tables[firstSheetName];
+  if (sheet == null || sheet.rows.isEmpty) {
+    return const <Map<String, dynamic>>[];
+  }
+
+  final rows = sheet.rows;
+  final headerRow = rows.first;
+  final headers = <String>[];
+  for (final cell in headerRow) {
+    final key = normalizeHeader(_cellValueToString(cell?.value));
+    headers.add(key);
+  }
+
+  final result = <Map<String, dynamic>>[];
+  for (var rowIndex = 1; rowIndex < rows.length; rowIndex++) {
+    final row = rows[rowIndex];
+    final mapped = <String, dynamic>{};
+    var hasData = false;
+
+    for (var col = 0; col < headers.length; col++) {
+      final header = headers[col];
+      if (header.isEmpty) {
+        continue;
+      }
+      final cell = col < row.length ? row[col] : null;
+      final value = _cellValueToPrimitive(cell?.value);
+      mapped[header] = value;
+      if (!_isBlankValue(value)) {
+        hasData = true;
+      }
+    }
+
+    if (hasData) {
+      result.add(mapped);
+    }
+  }
+
+  return result;
+}
+
+List<Map<String, dynamic>> parseCsvRows(Uint8List bytes) {
+  final text = _decodeText(bytes);
+  final lines = const LineSplitter().convert(text);
+  if (lines.isEmpty) {
+    return const <Map<String, dynamic>>[];
+  }
+
+  final nonEmptyLines =
+      lines.where((line) => line.trim().isNotEmpty).toList(growable: false);
+  if (nonEmptyLines.isEmpty) {
+    return const <Map<String, dynamic>>[];
+  }
+
+  final headerCells = _parseCsvLine(nonEmptyLines.first);
+  final headers = headerCells.map(normalizeHeader).toList(growable: false);
+
+  final result = <Map<String, dynamic>>[];
+  for (var i = 1; i < nonEmptyLines.length; i++) {
+    final cells = _parseCsvLine(nonEmptyLines[i]);
+    final row = <String, dynamic>{};
+    var hasData = false;
+
+    for (var c = 0; c < headers.length; c++) {
+      final header = headers[c];
+      if (header.isEmpty) {
+        continue;
+      }
+      final value = c < cells.length ? cells[c].trim() : '';
+      row[header] = value;
+      if (value.isNotEmpty) {
+        hasData = true;
+      }
+    }
+
+    if (hasData) {
+      result.add(row);
+    }
+  }
+
+  return result;
+}
+
+String _decodeText(Uint8List bytes) {
+  try {
+    return utf8.decode(bytes);
+  } catch (_) {
+    return latin1.decode(bytes);
+  }
+}
+
+List<String> _parseCsvLine(String line) {
+  final values = <String>[];
+  var buffer = StringBuffer();
+  var inQuotes = false;
+
+  for (var i = 0; i < line.length; i++) {
+    final ch = line[i];
+    if (ch == '"') {
+      final isEscapedQuote =
+          inQuotes && i + 1 < line.length && line[i + 1] == '"';
+      if (isEscapedQuote) {
+        buffer.write('"');
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (ch == ',' && !inQuotes) {
+      values.add(buffer.toString());
+      buffer = StringBuffer();
+      continue;
+    }
+    buffer.write(ch);
+  }
+  values.add(buffer.toString());
+  return values;
+}
+
+String _cellValueToString(ex.CellValue? value) {
+  if (value == null) {
+    return '';
+  }
+  if (value is ex.TextCellValue) {
+    return value.value.toString();
+  }
+  if (value is ex.IntCellValue) {
+    return value.value.toString();
+  }
+  if (value is ex.DoubleCellValue) {
+    final numeric = value.value;
+    if (numeric == numeric.roundToDouble()) {
+      return numeric.toInt().toString();
+    }
+    return numeric.toString();
+  }
+  if (value is ex.BoolCellValue) {
+    return value.value ? '1' : '0';
+  }
+  if (value is ex.TimeCellValue) {
+    return value.toString();
+  }
+  if (value is ex.DateTimeCellValue) {
+    return '${_twoDigits(value.hour)}:${_twoDigits(value.minute)}:${_twoDigits(value.second)}';
+  }
+  if (value is ex.DateCellValue) {
+    return '${value.year}-${_twoDigits(value.month)}-${_twoDigits(value.day)}';
+  }
+  if (value is ex.FormulaCellValue) {
+    return value.formula;
+  }
+  return value.toString();
+}
+
+dynamic _cellValueToPrimitive(ex.CellValue? value) {
+  if (value == null) {
+    return '';
+  }
+  if (value is ex.IntCellValue) {
+    return value.value;
+  }
+  if (value is ex.DoubleCellValue) {
+    return value.value;
+  }
+  if (value is ex.BoolCellValue) {
+    return value.value ? 1 : 0;
+  }
+  if (value is ex.TimeCellValue) {
+    return value.toString();
+  }
+  if (value is ex.DateTimeCellValue) {
+    return '${_twoDigits(value.hour)}:${_twoDigits(value.minute)}:${_twoDigits(value.second)}';
+  }
+  if (value is ex.DateCellValue) {
+    return '${value.year}-${_twoDigits(value.month)}-${_twoDigits(value.day)}';
+  }
+  if (value is ex.TextCellValue) {
+    return value.value.toString().trim();
+  }
+  if (value is ex.FormulaCellValue) {
+    return value.formula;
+  }
+  return value.toString();
+}
+
+bool _isBlankValue(dynamic value) {
+  if (value == null) {
+    return true;
+  }
+  if (value is String) {
+    return value.trim().isEmpty;
+  }
+  if (value is num) {
+    return false;
+  }
+  return value.toString().trim().isEmpty;
+}
+
+bool _isFullyEmptyRow(Map<String, dynamic> row) {
+  for (final value in row.values) {
+    if (!_isBlankValue(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int _resolveRowIndex(Map<String, dynamic> row, int fallbackIndex) {
+  final raw = row['NUM'];
+  if (raw == null) {
+    return fallbackIndex + 1;
+  }
+  if (raw is num) {
+    return raw.round();
+  }
+  final text = raw.toString().trim();
+  final parsed = int.tryParse(text);
+  return parsed ?? fallbackIndex + 1;
+}
+
+String _normalizeTimeValue(dynamic raw, int fallbackIndex) {
+  if (raw == null) {
+    return fallbackIndex.toString();
+  }
+
+  if (raw is ex.TimeCellValue) {
+    return raw.toString();
+  }
+
+  if (raw is ex.DateTimeCellValue) {
+    return '${_twoDigits(raw.hour)}:${_twoDigits(raw.minute)}:${_twoDigits(raw.second)}';
+  }
+
+  if (raw is num) {
+    if (raw >= 0 && raw < 1) {
+      final seconds = (raw * 24 * 60 * 60).round();
+      final h = (seconds ~/ 3600) % 24;
+      final m = (seconds % 3600) ~/ 60;
+      final s = seconds % 60;
+      return '${_twoDigits(h)}:${_twoDigits(m)}:${_twoDigits(s)}';
+    }
+    return raw.toString();
+  }
+
+  final text = raw.toString().trim();
+  if (text.isEmpty) {
+    return fallbackIndex.toString();
+  }
+  return text;
+}
+
+String normalizeHeader(String input) {
+  return input
+      .replaceAll('\uFEFF', '')
+      .replaceAll('\u00A0', ' ')
+      .trim()
+      .replaceAll(RegExp(r'\s+'), ' ');
+}
+
+String _fileExtension(String name) {
+  final dotIndex = name.lastIndexOf('.');
+  if (dotIndex < 0) {
+    return '';
+  }
+  return name.substring(dotIndex).toLowerCase();
+}
+
+double _parseNumber(dynamic value) {
+  if (value == null) {
+    return 0;
+  }
+  if (value is num) {
+    return value.toDouble();
+  }
+  final text = value.toString().trim();
+  if (text.isEmpty) {
+    return 0;
+  }
+  return double.tryParse(text.replaceAll(',', '')) ?? 0;
+}
+
+bool _parseBool(dynamic value) {
+  if (value == null) {
+    return false;
+  }
+  if (value is bool) {
+    return value;
+  }
+  if (value is num) {
+    return value != 0;
+  }
+  final text = value.toString().trim().toLowerCase();
+  if (text.isEmpty) {
+    return false;
+  }
+  if (text == '1' ||
+      text == 'true' ||
+      text == 'y' ||
+      text == 'yes' ||
+      text == 'on') {
+    return true;
+  }
+  if (text == '0' ||
+      text == 'false' ||
+      text == 'n' ||
+      text == 'no' ||
+      text == 'off') {
+    return false;
+  }
+  final asNumber = double.tryParse(text.replaceAll(',', ''));
+  return asNumber != null && asNumber != 0;
+}
+
+String _twoDigits(int value) => value.toString().padLeft(2, '0');
+
+String trainStateLabel(TrainState state) {
+  switch (state) {
+    case TrainState.inactive:
+      return '비활성';
+    case TrainState.controlPending:
+      return '제어권 대기';
+    case TrainState.berthed:
+      return '정차';
+    case TrainState.doorOpen:
+      return '문열림';
+    case TrainState.doorClosing:
+      return '문닫힘';
+    case TrainState.readyToDepart:
+      return '발차대기';
+    case TrainState.departureCommand:
+      return '발차명령';
+    case TrainState.running:
+      return '주행';
+    case TrainState.braking:
+      return '제동';
+    case TrainState.forcedBraking:
+      return '강제제동';
+    case TrainState.inhibited:
+      return '운행억제';
+    case TrainState.emergency:
+      return '비상';
+  }
+}
+
+String operationModeLabel(OperationMode mode) {
+  switch (mode) {
+    case OperationMode.unknown:
+      return '미확인';
+    case OperationMode.manual:
+      return '수동운전';
+    case OperationMode.auto:
+      return '자동운전';
+    case OperationMode.yard:
+      return '기지운전';
+    case OperationMode.emergency:
+      return '비상운전';
+    case OperationMode.emergencyRescue:
+      return '비상구원운전';
+  }
+}
+
+String entryTypeLabel(EntryType type) {
+  switch (type) {
+    case EntryType.info:
+      return '정보';
+    case EntryType.door:
+      return '도어';
+    case EntryType.atc:
+      return 'ATC';
+    case EntryType.ato:
+      return 'ATO';
+    case EntryType.tcms:
+      return 'TCMS';
+    case EntryType.brake:
+      return '제동';
+    case EntryType.mode:
+      return '모드';
+    case EntryType.warning:
+      return '경고';
+    case EntryType.critical:
+      return '비상';
+  }
+}
+
+String findingEventLabel(String code) {
+  if (code.startsWith('EVT-')) {
+    switch (code) {
+      case 'EVT-ADC-OPEN':
+        return '출입문 열림 감지';
+      case 'EVT-ADC-CLOSE':
+        return '전차 완폐 확인';
+      case 'EVT-DPT':
+        return '출발 허가 형성';
+      case 'EVT-FSBR':
+        return '전상용제동 체결';
+      case 'EVT-ADBS':
+        return '바이패스 취급 감지';
+      case 'EVT-CTRL':
+        return '제어권 이상 감지';
+      case 'EVT-MODE-CHANGE':
+        return '운전모드 전환';
+      case 'EVT-EMERG-RUN':
+        return '주행 중 비상모드 전환';
+      case 'EVT-DRIVL':
+        return '무인운전 모드 활성';
+      case 'EVT-FORWAR':
+        return '전방 예고 감지';
+      case 'EVT-PBR':
+        return '추진/제동 요청 감지';
+      case 'EVT-PAN-UP':
+        return '판토 상승 버튼 취급';
+      case 'EVT-PAN-DN':
+        return '판토 하강 버튼 취급';
+      case 'EVT-STOP':
+        return '정차 전환';
+      case 'EVT-MOVE':
+        return '이동 전환';
+      case 'EVT-NEXTSTA':
+        return '다음역 갱신';
+      case 'EVT-DEPART':
+        return '발차 확정';
+      default:
+        return '이벤트';
+    }
+  }
+
+  switch (code) {
+    case 'D1':
+      return '출발 불능';
+    case 'D2':
+      return '출입문 미완폐';
+    case 'D3':
+      return '제어권 형성 실패';
+    case 'D4':
+      return '무코드 + FSB';
+    case 'D5':
+      return '과속 + FSB';
+    case 'D6':
+      return 'ATO 미동작';
+    case 'D7':
+      return '운행금지 활성';
+    case 'D8':
+      return 'EB 루프 이상';
+    case 'D9':
+      return '바이패스 경고';
+    case 'D10':
+      return '신호 불일치';
+    case 'D11':
+      return '비상구원운전';
+    case 'D12':
+      return '판토 버튼 이벤트';
+    case 'D13':
+      return '비상제동 버튼 취급';
+    case 'D14':
+      return '운전모드 미설정';
+    case 'D15':
+      return 'FSB 보조 해석';
+    case 'D16':
+      return '무코드 FSBR 지연';
+    default:
+      return code;
+  }
+}
+
+Color entryTypeColor(EntryType type, ColorScheme scheme) {
+  switch (type) {
+    case EntryType.info:
+      return scheme.primary;
+    case EntryType.door:
+      return const Color(0xFF00695C);
+    case EntryType.atc:
+      return const Color(0xFF1E3A8A);
+    case EntryType.ato:
+      return const Color(0xFF1B5E20);
+    case EntryType.tcms:
+      return const Color(0xFF0F766E);
+    case EntryType.brake:
+      return const Color(0xFFB45309);
+    case EntryType.mode:
+      return const Color(0xFF374151);
+    case EntryType.warning:
+      return const Color(0xFFB45309);
+    case EntryType.critical:
+      return const Color(0xFFB91C1C);
+  }
+}
+
+final List<SignalDefinition> kSignalDefinitions = _buildSignalDefinitions();
+
+List<SignalDefinition> _buildSignalDefinitions() {
+  final overrides = <String, SignalDefinition>{
+    'NUM': const SignalDefinition(
+      key: 'NUM',
+      label: '순번',
+      description: '로그 행 번호',
+      type: 'number',
+      category: 'basic',
+    ),
+    'TIME': const SignalDefinition(
+      key: 'TIME',
+      label: '시각',
+      description: '1초 단위 기록 시각',
+      type: 'code',
+      category: 'basic',
+    ),
+    'NEXTSTA': const SignalDefinition(
+      key: 'NEXTSTA',
+      label: '다음역',
+      description: '다음 역 코드',
+      type: 'code',
+      category: 'location',
+    ),
+    'DIST': const SignalDefinition(
+      key: 'DIST',
+      label: '잔여거리',
+      description: '다음 정차점까지 거리',
+      type: 'number',
+      category: 'location',
+    ),
+    'VEL': const SignalDefinition(
+      key: 'VEL',
+      label: '실제속도',
+      description: '열차 실제 속도(km/h)',
+      type: 'number',
+      category: 'basic',
+    ),
+    'P/B': const SignalDefinition(
+      key: 'P/B',
+      label: '추진/제동',
+      description: '마스콘/ATO 추진·제동 명령값',
+      type: 'percent',
+      category: 'brake',
+    ),
+    'MC N': const SignalDefinition(
+      key: 'MC N',
+      label: 'MC N 보조신호(미확정)',
+      description: '마스콘 중립 관련 보조 신호(극성 미확정, FOR/REV 직접 대응 아님)',
+      type: 'bool',
+      category: 'mode',
+      confidence: '미확정',
+    ),
+    'EMERG': const SignalDefinition(
+      key: 'EMERG',
+      label: '비상운전 모드',
+      description: 'Emergency driving mode',
+      type: 'bool',
+      category: 'mode',
+      confidence: '확정',
+    ),
+    'EMEGR': const SignalDefinition(
+      key: 'EMEGR',
+      label: '비상구원운전 모드',
+      description: 'Emergency rescue driving mode',
+      type: 'bool',
+      category: 'mode',
+      confidence: '확정',
+    ),
+    'PAN UP': const SignalDefinition(
+      key: 'PAN UP',
+      label: '판토상승 버튼',
+      description: '판토상승 버튼 입력 (0=미취급, 1=버튼 입력)',
+      type: 'bool',
+      category: 'mode',
+      confidence: '확정',
+    ),
+    'PAN DN': const SignalDefinition(
+      key: 'PAN DN',
+      label: '판토하강 버튼',
+      description: '판토하강 버튼 입력 (0=미취급, 1=버튼 입력)',
+      type: 'bool',
+      category: 'mode',
+      confidence: '확정',
+    ),
+    'EMPB': const SignalDefinition(
+      key: 'EMPB',
+      label: '비상제동 버튼',
+      description: 'Emergency brake push button',
+      type: 'bool',
+      category: 'brake',
+      confidence: '확정',
+    ),
+    'FOR WAR': const SignalDefinition(
+      key: 'FOR WAR',
+      label: '전방 예고',
+      description: 'Forward warning / pre-announcement signal',
+      type: 'bool',
+      category: 'atc',
+      confidence: '확정',
+    ),
+    'DRIVL': const SignalDefinition(
+      key: 'DRIVL',
+      label: '무인운전 모드',
+      description: 'Driverless mode status',
+      type: 'bool',
+      category: 'mode',
+      confidence: '확정',
+    ),
+    'PBR': const SignalDefinition(
+      key: 'PBR',
+      label: '추진/제동 요청',
+      description: 'Power/Brake request signal',
+      type: 'bool',
+      category: 'brake',
+      confidence: '확정',
+    ),
+    'HCR': const SignalDefinition(
+      key: 'HCR',
+      label: '전두부 제어 계전기',
+      description: '활성 운전실 형성 전달 신호',
+      type: 'bool',
+      category: 'mode',
+    ),
+    'ATC ON': const SignalDefinition(
+      key: 'ATC ON',
+      label: 'ATC 제어 승인',
+      description: 'TCMS에서 ATC 제어권 승인',
+      type: 'bool',
+      category: 'atc',
+    ),
+    'ADC': const SignalDefinition(
+      key: 'ADC',
+      label: '전차 출입문 닫힘',
+      description: 'All Door Closed (1=전차 완폐)',
+      type: 'bool',
+      category: 'door',
+    ),
+    'ATC1/2NCode': const SignalDefinition(
+      key: 'ATC1/2NCode',
+      label: '무코드',
+      description: 'No Code (지상 신호 미수신)',
+      type: 'bool',
+      category: 'atc',
+    ),
+    'ATC1/2DPT-PM': const SignalDefinition(
+      key: 'ATC1/2DPT-PM',
+      label: '출발허가',
+      description: 'Departure Permit',
+      type: 'bool',
+      category: 'atc',
+    ),
+    'ATC1/2FSBR': const SignalDefinition(
+      key: 'ATC1/2FSBR',
+      label: '전상용제동 요청',
+      description: 'Full Service Brake Request',
+      type: 'bool',
+      category: 'brake',
+    ),
+    'DOOR0': const SignalDefinition(
+      key: 'DOOR0',
+      label: '0호차 도어 닫힘',
+      description: '유효 호차 도어 상태 (1=닫힘)',
+      type: 'bool',
+      category: 'door',
+    ),
+    'DOOR1': const SignalDefinition(
+      key: 'DOOR1',
+      label: '1호차 도어 닫힘',
+      description: '유효 호차 도어 상태 (1=닫힘)',
+      type: 'bool',
+      category: 'door',
+    ),
+    'DOOR2': const SignalDefinition(
+      key: 'DOOR2',
+      label: '2호차 도어 닫힘',
+      description: '유효 호차 도어 상태 (1=닫힘)',
+      type: 'bool',
+      category: 'door',
+    ),
+    'DOOR7': const SignalDefinition(
+      key: 'DOOR7',
+      label: '7호차 도어 닫힘',
+      description: '유효 호차 도어 상태 (1=닫힘)',
+      type: 'bool',
+      category: 'door',
+    ),
+    'DOOR3': const SignalDefinition(
+      key: 'DOOR3',
+      label: '3호차 도어(미사용)',
+      description: '비실차/비사용 신호로 분석에서 제외',
+      type: 'bool',
+      category: 'ignored',
+      confidence: '확정',
+    ),
+    'DOOR4': const SignalDefinition(
+      key: 'DOOR4',
+      label: '4호차 도어(미사용)',
+      description: '비실차/비사용 신호로 분석에서 제외',
+      type: 'bool',
+      category: 'ignored',
+      confidence: '확정',
+    ),
+    'DOOR5': const SignalDefinition(
+      key: 'DOOR5',
+      label: '5호차 도어(미사용)',
+      description: '비실차/비사용 신호로 분석에서 제외',
+      type: 'bool',
+      category: 'ignored',
+      confidence: '확정',
+    ),
+    'DOOR6': const SignalDefinition(
+      key: 'DOOR6',
+      label: '6호차 도어(미사용)',
+      description: '비실차/비사용 신호로 분석에서 제외',
+      type: 'bool',
+      category: 'ignored',
+      confidence: '확정',
+    ),
+    'ADBS': const SignalDefinition(
+      key: 'ADBS',
+      label: '출입문 바이패스',
+      description: 'All Door Bypass',
+      type: 'bool',
+      category: 'door',
+    ),
+    'ATO NMID': const SignalDefinition(
+      key: 'ATO NMID',
+      label: '움직임 미검출',
+      description: 'No Motion ID',
+      type: 'bool',
+      category: 'ato',
+    ),
+    'TCMS-INBITD': const SignalDefinition(
+      key: 'TCMS-INBITD',
+      label: 'TCMS 운행금지',
+      description: 'TCMS Inhibit Driving',
+      type: 'bool',
+      category: 'tcms',
+    ),
+    'ATO INBITD': const SignalDefinition(
+      key: 'ATO INBITD',
+      label: 'ATO 운행금지',
+      description: 'ATO Inhibit Driving',
+      type: 'bool',
+      category: 'ato',
+    ),
+    'TCMS-CAB ACT': const SignalDefinition(
+      key: 'TCMS-CAB ACT',
+      label: '활성 운전실',
+      description: 'TCMS Cab Active',
+      type: 'bool',
+      category: 'tcms',
+    ),
+    'TCMS-ATCHBR': const SignalDefinition(
+      key: 'TCMS-ATCHBR',
+      label: '정차제동 유지',
+      description: 'ATC Holding Brake Request',
+      type: 'bool',
+      category: 'brake',
+    ),
+    'EBCOS': const SignalDefinition(
+      key: 'EBCOS',
+      label: '비상제동 차단',
+      description: 'Emergency Brake Cut-Out Switch',
+      type: 'bool',
+      category: 'safety',
+    ),
+    'EB loop': const SignalDefinition(
+      key: 'EB loop',
+      label: '비상루프',
+      description: '비상제동 안전루프 도통',
+      type: 'bool',
+      category: 'safety',
+    ),
+  };
+
+  return kAllHeaders.map((key) {
+    final known = overrides[key];
+    if (known != null) {
+      return known;
+    }
+    return SignalDefinition(
+      key: key,
+      label: key,
+      description: '$key 신호',
+      type: _defaultTypeForKey(key),
+      category: _defaultCategoryForKey(key),
+      confidence: '입력',
+    );
+  }).toList(growable: false);
+}
+
+String _defaultTypeForKey(String key) {
+  if (key == 'NUM' || key == 'DIST' || key == 'VEL') {
+    return 'number';
+  }
+  if (key == 'P/B' || key == 'ATO P/B COM') {
+    return 'percent';
+  }
+  if (key == 'NEXTSTA' || key == 'TIME') {
+    return 'code';
+  }
+  return 'bool';
+}
+
+String _defaultCategoryForKey(String key) {
+  if (const {'NUM', 'TIME', 'VEL'}.contains(key)) {
+    return 'basic';
+  }
+  if (const {'NEXTSTA', 'DIST'}.contains(key)) {
+    return 'location';
+  }
+  if (key.startsWith('ATC1/2') || key == 'ATC ON' || key == 'ATC EB') {
+    return 'atc';
+  }
+  if (key.startsWith('ATO ')) {
+    return 'ato';
+  }
+  if (key.startsWith('TCMS') || key.startsWith('TWC')) {
+    return 'tcms';
+  }
+  if (key.startsWith('DOOR') ||
+      key.contains('OPEN') ||
+      key.contains('CLOSE') ||
+      key.startsWith('AO/') ||
+      key == 'MO/MC' ||
+      key == 'ADBS' ||
+      key == 'ADC') {
+    return 'door';
+  }
+  if (const {
+    'AUTO',
+    'DRIVL',
+    'MANUAL',
+    'EMERG',
+    'YARD',
+    'FOR',
+    'REV',
+    'HCR',
+    'MC N'
+  }.contains(key)) {
+    return 'mode';
+  }
+  if (key.contains('BR') || key.contains('PB') || key.contains('EB')) {
+    return 'brake';
+  }
+  return 'safety';
+}
+
+const Map<int, String> kStationNames = <int, String>{
+  101: '소태',
+  102: '증심사입구',
+  103: '남광주',
+  104: '문화전당',
+  105: '금남로4가',
+  106: '금남로5가',
+  107: '양동시장',
+  108: '돌고개',
+  109: '농성',
+  110: '화정',
+  111: '쌍촌',
+  112: '운천',
+  113: '상무',
+  114: '김대중컨벤션센터',
+  115: '공항',
+  116: '송정공원',
+  117: '광주송정',
+  118: '도산',
+  119: '평동',
+  140: '녹동',
+  150: '기지입고',
+  165: '시운전',
+  166: '회송',
+};
+
+const List<int> kEffectiveDoorCars = <int>[0, 1, 2, 7];
+
+const List<String> kAllHeaders = <String>[
+  'NUM',
+  'TIME',
+  'NEXTSTA',
+  'DIST',
+  'VEL',
+  'FOR',
+  'REV',
+  'P/B',
+  'ATO RDY',
+  'ATC EB',
+  'EB loop',
+  'MC N',
+  'ATC ON',
+  'HCR',
+  'EBR',
+  'FOR WAR',
+  'EMEGR',
+  'PAN UP',
+  'PAN DN',
+  'EMPB',
+  'EBCOS',
+  'SBS',
+  'PBR',
+  'CRPB',
+  'PBPS',
+  'AUTO',
+  'DRIVL',
+  'MANUAL',
+  'EMERG',
+  'YARD',
+  'ATC1/2NCode',
+  'ATC1/2 0',
+  'ATC1/2 15',
+  'ATC1/2 25',
+  'ATC1/2 30',
+  'ATC1/2 35',
+  'ATC1/2 40',
+  'ATC1/2 45',
+  'ATC1/2 50',
+  'ATC1/2 55',
+  'ATC1/2 60',
+  'ATC1/2 65',
+  'ATC1/2 70',
+  'ATC1/2 75',
+  'ATC1/2 80',
+  'AO/AC',
+  'AO/MC',
+  'MO/MC',
+  'ADBS',
+  'DOOR1',
+  'DOOR2',
+  'DOOR3',
+  'DOOR4',
+  'DOOR5',
+  'DOOR6',
+  'DOOR7',
+  'DOOR0',
+  'OPEN-L',
+  'OPEN-R',
+  'CLOSE',
+  'REOPEN',
+  'S_OPEN-L',
+  'S_OPEN-R',
+  'S_CLOSE',
+  'S_REOPEN',
+  'ATC1/2DPT-PM',
+  'ATC1/2OPEN-L',
+  'ATC1/2OPEN-R',
+  'ATC1/2S&P',
+  'ATC1/2FSBR',
+  'ATC1/2KEYUP',
+  'ATC1/2KEYDN',
+  'ATC1/2DptBP',
+  'ATC1/2EDR',
+  'ATC1/2EDL',
+  'ATO P/B COM',
+  'ATO RCVD',
+  'ATO NMID',
+  'ATO INBITD',
+  'ATO STB',
+  'ATO PSMID F1',
+  'ATO PSMID F2',
+  'ATO PSMID F3',
+  'ATO PSMID F4',
+  'ATO PSMID F5',
+  'ATO PSMID F6',
+  'ATO PSMID F7',
+  'ATO PSMID F8',
+  'TCMS-INBITD',
+  'TCMS-CAB ACT',
+  'TCMS-Act ATO',
+  'TCMS-ATCHBR',
+  'TCMS-EMTRIP',
+  'TCMS D-ACKR',
+  'TWC D-ACK',
+  'ADC',
+];
+
+// 향후 확장 포인트
+// 1) determineState() 상태 전이 기록 객체(StateMachineContext) 추가
+// 2) applyDiagnosticRules()를 규칙 테이블 기반 DSL로 분리
+// 3) 상/하선 라인 정보와 위치 정보(DIST/NEXTSTA) 기반 진단 강화
+

@@ -56,3 +56,6 @@ app.*.map.json
 /*.xlsx
 /*.bundle
 /*.bundle.lock
+
+# Local Netlify folder
+.netlify
