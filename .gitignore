@@ -59,3 +59,9 @@ app.*.map.json
 
 # Local Netlify folder
 .netlify
+
+# Local temporary artifacts
+/odd_quotes.txt
+/lib/main_dial_backup.dart
+/tool/*.log
+/*.xls
