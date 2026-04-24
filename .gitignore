@@ -64,4 +64,5 @@ app.*.map.json
 /odd_quotes.txt
 /lib/main_dial_backup.dart
 /tool/*.log
+/.tmp/
 /*.xls
