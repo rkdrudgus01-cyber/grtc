@@ -188,6 +188,17 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
   String summaryText = '';
   bool isLoading = false;
   LogViewMode viewMode = LogViewMode.detail;
+  List<List<dynamic>>? _sourceRows;
+  String _sourceFileSummary = '';
+  final TextEditingController _startTimeController = TextEditingController();
+  final TextEditingController _endTimeController = TextEditingController();
+
+  @override
+  void dispose() {
+    _startTimeController.dispose();
+    _endTimeController.dispose();
+    super.dispose();
+  }
 
   bool _isXlsFile(String fileName, Uint8List bytes) {
     if (fileName.toLowerCase().endsWith('.xls')) return true;
@@ -309,6 +320,125 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     return null;
   }
 
+  String? _validateFilterTime(String raw) {
+    final value = raw.trim();
+    if (value.isEmpty) return null;
+    return _parseLogTime(value) == null ? '시간 형식은 HH:mm:ss로 입력해 주세요.' : null;
+  }
+
+  String _timeFilterLabel(Duration? start, Duration? end) {
+    String format(Duration value) {
+      String two(int number) => number.toString().padLeft(2, '0');
+      final hours = two(value.inHours);
+      final minutes = two(value.inMinutes.remainder(60));
+      final seconds = two(value.inSeconds.remainder(60));
+      return '$hours:$minutes:$seconds';
+    }
+
+    if (start == null && end == null) return '전체 시간';
+    if (start != null && end != null) return '${format(start)}~${format(end)}';
+    if (start != null) return '${format(start)} 이후';
+    return '${format(end!)} 이전';
+  }
+
+  Future<List<List<dynamic>>> _parseLogFile(PlatformFile file) async {
+    final bytes = file.bytes;
+    if (bytes == null) {
+      throw '${file.name} 파일을 읽을 수 없습니다.';
+    }
+    if (_isXlsFile(file.name, bytes)) {
+      throw '.xls 형식은 지원하지 않습니다. .xlsx 또는 .csv로 변환해 주세요.';
+    }
+
+    final rows = <List<dynamic>>[];
+    if (bytes.length > 2 && bytes[0] == 0x50 && bytes[1] == 0x4B) {
+      final excel = Excel.decodeBytes(bytes);
+      if (excel.tables.isEmpty) return rows;
+      final table = excel.tables[excel.tables.keys.first]!;
+      for (final row in table.rows) {
+        rows.add(row.toList());
+      }
+    } else {
+      final lines = utf8
+          .decode(bytes, allowMalformed: true)
+          .split(RegExp(r'\r?\n'))
+          .where((line) => line.trim().isNotEmpty);
+      for (final line in lines) {
+        rows.add(line.split(','));
+      }
+    }
+    return rows;
+  }
+
+  List<String> _normalizedHeader(List<dynamic> row) {
+    return row.map((cell) => _cellToStr(cell).toUpperCase()).toList();
+  }
+
+  List<List<dynamic>> _mergeRows(List<List<List<dynamic>>> files) {
+    if (files.isEmpty || files.any((rows) => rows.isEmpty)) {
+      throw '데이터가 비어 있습니다.';
+    }
+
+    final baseHeader = _normalizedHeader(files.first.first);
+    const requiredColumns = ['TIME', 'NEXTSTA', 'DIST', 'VEL', 'ADC'];
+    for (final column in requiredColumns) {
+      if (!baseHeader.contains(column)) {
+        throw '필수 컬럼($column)이 없어 분석할 수 없습니다.';
+      }
+    }
+
+    final mergedDataRows = <List<dynamic>>[];
+    for (final rows in files) {
+      final header = _normalizedHeader(rows.first);
+      if (header.toSet().length != baseHeader.toSet().length ||
+          !header.toSet().containsAll(baseHeader)) {
+        throw '두 파일의 운행기록 형식이 달라 병합할 수 없습니다.';
+      }
+
+      final order = baseHeader.map((name) => header.indexOf(name)).toList();
+      for (final row in rows.skip(1)) {
+        mergedDataRows.add([
+          for (final idx in order) idx >= 0 && idx < row.length ? row[idx] : '',
+        ]);
+      }
+    }
+
+    final timeIndex = baseHeader.indexOf('TIME');
+    mergedDataRows.sort((a, b) {
+      final aTime = _parseLogTime(_cellToStr(a[timeIndex])) ?? Duration.zero;
+      final bTime = _parseLogTime(_cellToStr(b[timeIndex])) ?? Duration.zero;
+      return aTime.compareTo(bTime);
+    });
+
+    return [files.first.first, ...mergedDataRows];
+  }
+
+  List<List<dynamic>> _filterRowsByTime(
+    List<List<dynamic>> rows,
+    Duration? start,
+    Duration? end,
+  ) {
+    if (start == null && end == null) return rows;
+    if (rows.isEmpty) return rows;
+
+    final header = _normalizedHeader(rows.first);
+    final timeIndex = header.indexOf('TIME');
+    if (timeIndex == -1) {
+      throw 'TIME 컬럼이 없어 시간대 필터를 적용할 수 없습니다.';
+    }
+
+    final filtered = <List<dynamic>>[rows.first];
+    for (final row in rows.skip(1)) {
+      if (timeIndex >= row.length) continue;
+      final time = _parseLogTime(_cellToStr(row[timeIndex]));
+      if (time == null) continue;
+      if (start != null && time < start) continue;
+      if (end != null && time > end) continue;
+      filtered.add(row);
+    }
+    return filtered;
+  }
+
   Duration _resolveSampleDelta(String prevTime, String currTime) {
     final prev = _parseLogTime(prevTime);
     final curr = _parseLogTime(currTime);
@@ -416,6 +546,24 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       }
     }
     return cars;
+  }
+
+  String _doorBypassTargetLabel(
+    List<dynamic> prev,
+    List<dynamic> curr,
+    Map<String, int> doorIdx,
+  ) {
+    final prevCars = _uncClosedDoorCars(prev, doorIdx);
+    final cars = prevCars.isNotEmpty ? prevCars : _uncClosedDoorCars(curr, doorIdx);
+    return cars.isEmpty ? '대상 불명' : cars.join(', ');
+  }
+
+  String _doorBypassReportMessage(
+    String target,
+    String adcValue, {
+    String? suffix,
+  }) {
+    return '기관사 출입문 바이패스 취급($target), ${_allDoorCloseText(adcValue)}${suffix ?? ''}';
   }
 
   String? _doorLocationPrefix({
@@ -808,13 +956,75 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['xlsx', 'csv', 'xls'],
+      allowMultiple: true,
       withData: true,
     );
     if (result == null) return;
+    if (result.files.length > 2) {
+      setState(() {
+        statusText = '운행기록 파일은 최대 2개까지 선택할 수 있습니다.';
+      });
+      return;
+    }
 
-    final bytes = result.files.first.bytes!;
-    if (_isXlsFile(result.files.first.name, bytes)) {
-      _showXlsWarning();
+    _startTimeController.clear();
+    _endTimeController.clear();
+    setState(() {
+      isLoading = true;
+      logs = [];
+      blocks = [];
+      summaryText = '';
+      statusText = result.files.length == 2
+          ? '파일 2개 병합 중...'
+          : '전동차 운행로그를 분석 중입니다...';
+    });
+
+    try {
+      final parsedFiles = <List<List<dynamic>>>[];
+      final rowCounts = <String>[];
+      for (final file in result.files) {
+        final rows = await _parseLogFile(file);
+        parsedFiles.add(rows);
+        rowCounts.add('${file.name} ${rows.isNotEmpty ? rows.length - 1 : 0}행');
+      }
+      final mergedRows = _mergeRows(parsedFiles);
+      _sourceRows = mergedRows;
+      _sourceFileSummary = result.files.length == 2
+          ? '${rowCounts.join(' / ')} | 병합 후 ${mergedRows.length - 1}행'
+            : rowCounts.first;
+      await _analyzeRows(mergedRows, filterLabel: '전체 시간');
+    } catch (e) {
+      setState(() {
+        isLoading = false;
+        statusText = e.toString().contains('.xls')
+            ? '오류: .xls 형식은 지원하지 않습니다. .xlsx 또는 .csv로 변환해 주세요.'
+            : '오류: $e';
+      });
+      if (e.toString().contains('.xls')) {
+        _showXlsWarning();
+      }
+    }
+  }
+
+  Future<void> _applyTimeFilter() async {
+    final sourceRows = _sourceRows;
+    if (sourceRows == null) return;
+
+    final startError = _validateFilterTime(_startTimeController.text);
+    final endError = _validateFilterTime(_endTimeController.text);
+    if (startError != null || endError != null) {
+      setState(() {
+        statusText = startError ?? endError!;
+      });
+      return;
+    }
+
+    final start = _parseLogTime(_startTimeController.text);
+    final end = _parseLogTime(_endTimeController.text);
+    if (start != null && end != null && start > end) {
+      setState(() {
+        statusText = '시작 시간이 종료 시간보다 늦습니다.';
+      });
       return;
     }
 
@@ -823,30 +1033,37 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       logs = [];
       blocks = [];
       summaryText = '';
-      statusText = '전동차 운행로그를 분석 중입니다...';
+      statusText = '선택한 시간대를 다시 분석 중입니다...';
     });
 
     try {
-      final rows = <List<dynamic>>[];
-      if (bytes.length > 2 && bytes[0] == 0x50 && bytes[1] == 0x4B) {
-        final excel = Excel.decodeBytes(bytes);
-        final table = excel.tables[excel.tables.keys.first]!;
-        for (final row in table.rows) {
-          rows.add(row.toList());
-        }
-      } else {
-        final lines = utf8
-            .decode(bytes, allowMalformed: true)
-            .split(RegExp(r'\r?\n'))
-            .where((line) => line.trim().isNotEmpty);
-        for (final line in lines) {
-          rows.add(line.split(','));
-        }
+      final rows = _filterRowsByTime(sourceRows, start, end);
+      if (rows.length <= 1) {
+        setState(() {
+          isLoading = false;
+          logs = [];
+          blocks = [];
+          summaryText = '';
+          statusText = '선택한 시간대에 해당하는 운행기록이 없습니다.';
+        });
+        return;
       }
+      await _analyzeRows(rows, filterLabel: _timeFilterLabel(start, end));
+    } catch (e) {
+      setState(() {
+        isLoading = false;
+        statusText = '오류: $e';
+      });
+    }
+  }
 
-      if (rows.isEmpty) {
-        throw '데이터가 비어 있습니다.';
-      }
+  Future<void> _analyzeRows(
+    List<List<dynamic>> rows, {
+    required String filterLabel,
+  }) async {
+    if (rows.isEmpty) {
+      throw '데이터가 비어 있습니다.';
+    }
 
       final header = rows.first
           .map((cell) => _cellToStr(cell).toUpperCase())
@@ -970,6 +1187,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       bool doorCloseReopenLogged = false;
       bool doorCloseBypassLogged = false;
       bool lastDoorCycleHadDelay = false;
+      String lastDoorBypassTarget = '대상 불명';
 
       for (var i = 1; i < rows.length; i++) {
         final curr = rows[i];
@@ -1131,6 +1349,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                 doorCloseReopenLogged = false;
                 doorCloseBypassLogged = false;
                 lastDoorCycleHadDelay = false;
+                lastDoorBypassTarget = '대상 불명';
               } else if (entry.key == 'REOPEN' &&
                   doorClosePending &&
                   !doorCloseReopenLogged) {
@@ -1155,11 +1374,15 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
             !doorCloseBypassLogged) {
           rowHadDoorActivity = true;
           rowHadDoorCycle = true;
+          lastDoorBypassTarget = _doorBypassTargetLabel(prev, curr, doorIdx);
           tempLogs.add(
             LogEntry(
               time: time,
-              message:
-                  '기관사 출입문 바이패스 취급, ${_allDoorCloseText(currAdcValue)} (출입문 모드: ${lastDoorCloseMode ?? currentDoorMode})',
+              message: _doorBypassReportMessage(
+                lastDoorBypassTarget,
+                currAdcValue,
+                suffix: ' (출입문 모드: ${lastDoorCloseMode ?? currentDoorMode})',
+              ),
               type: EntryType.bypass,
               isSummary: true,
             ),
@@ -1194,7 +1417,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                 LogEntry(
                   time: time,
                   message: doorCloseBypassLogged
-                      ? '기관사 출입문 바이패스 취급, ${_allDoorCloseText('1')}'
+                      ? _doorBypassReportMessage(lastDoorBypassTarget, '1')
                       : '${_allDoorCloseText('1')} (출입문 모드: ${lastDoorCloseMode ?? currentDoorMode})',
                   type: EntryType.restore,
                   isSummary: true,
@@ -1223,7 +1446,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
             LogEntry(
               time: time,
               message: hasAdcDoorMismatch
-                  ? '기관사 출입문 바이패스 취급, ${_allDoorCloseText('1')} (바이패스 대상 불일치 가능성)'
+                  ? '${_doorBypassReportMessage(_doorBypassTargetLabel(prev, curr, doorIdx), '1')} (바이패스 대상 불일치 가능성)'
                   : _allDoorCloseText(currAdcValue),
               type: hasAdcDoorMismatch ? EntryType.bypass : EntryType.restore,
               isSummary: true,
@@ -1622,18 +1845,13 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       );
 
       setState(() {
-        statusText = '분석 완료 | ${rows.length - 1}개 행 처리';
+        statusText =
+            '분석 완료 | $filterLabel 구간 ${rows.length - 1}개 행 처리${_sourceFileSummary.isEmpty ? '' : ' | $_sourceFileSummary'}';
         summaryText = _buildSummary(resolvedLogs);
         logs = resolvedLogs;
         blocks = resolvedBlocks;
         isLoading = false;
       });
-    } catch (e) {
-      setState(() {
-        isLoading = false;
-        statusText = '오류: $e';
-      });
-    }
   }
 
   @override
@@ -1699,6 +1917,51 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
               ),
             ),
           ),
+          if (_sourceRows != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _startTimeController,
+                      enabled: !isLoading,
+                      decoration: const InputDecoration(
+                        labelText: '시작 시간',
+                        hintText: 'HH:mm:ss',
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: _endTimeController,
+                      enabled: !isLoading,
+                      decoration: const InputDecoration(
+                        labelText: '종료 시간',
+                        hintText: 'HH:mm:ss',
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    height: 48,
+                    child: ElevatedButton(
+                      onPressed: isLoading ? null : _applyTimeFilter,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF2C3E50),
+                        foregroundColor: Colors.white,
+                      ),
+                      child: const Text('적용'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           if (logs.isEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
