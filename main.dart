@@ -44,7 +44,7 @@ const List<int> kEffectiveDoorCars = [0, 1, 2, 7];
 const List<String> kActiveDoors = ['DOOR0', 'DOOR1', 'DOOR2', 'DOOR7'];
 
 const Map<String, String> kSignalDisplayNames = {
-  'ADC': '전체 출입문 닫힘',
+  'ADC': 'ALL DOOR CLOSE',
   'OPEN-L': '좌측 문열림 버튼 취급',
   'OPEN-R': '우측 문열림 버튼 취급',
   'CLOSE': '문닫힘 버튼 취급',
@@ -597,7 +597,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     return station == null ? ' (현재 역: 미확인)' : ' (현재 역: $station)';
   }
 
-  String _allDoorCloseText(String adcValue) => '전체 출입문 닫힘 "$adcValue"';
+  String _allDoorCloseText(String adcValue) => 'ALL DOOR CLOSE "$adcValue"';
 
   String _doorButtonActionLabel(String signal) {
     switch (signal) {
@@ -900,9 +900,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     }
 
     final messages = entries.map((entry) => entry.message).join('\n');
-    final hasDoor = messages.contains('전체 출입문 닫힘') || messages.contains('출입문');
+    final hasDoor = messages.contains('ALL DOOR CLOSE') || messages.contains('출입문');
     final hasDoorCloseCycle =
-        messages.contains('전체 출입문 닫힘') ||
+        messages.contains('ALL DOOR CLOSE') ||
         messages.contains('기관사 닫힘버튼 취급');
     final hasMode = messages.contains('전환된 정황');
     final hasFsbr = messages.contains('전상용제동(FSB) 체결');
@@ -916,7 +916,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final nCodeCount = _countMessages(entries, '무코드');
     final fsbrCount = _countMessages(entries, '전상용제동(FSB) 체결');
     final modeCount = _countMessages(entries, '전환된 정황');
-    final doorCloseCycleCount = _countMessages(entries, '전체 출입문 닫힘');
+    final doorCloseCycleCount = _countMessages(entries, 'ALL DOOR CLOSE');
     final timeSuffix = _summaryTimeSuffix(entries);
 
     if (hasNCode && hasFsbr && hasMode) {
@@ -926,7 +926,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       return '출입문 닫힘 사이클 $doorCloseCycleCount건과 출발 흐름이 확인됩니다.$timeSuffix';
     }
     if (hasDoorCloseCycle) {
-      return '출입문 닫힘 버튼 취급 이후 전체 출입문 닫힘 형성 흐름이 $doorCloseCycleCount건 확인됩니다.$timeSuffix';
+      return '출입문 닫힘 버튼 취급 이후 ALL DOOR CLOSE 형성 흐름이 $doorCloseCycleCount건 확인됩니다.$timeSuffix';
     }
     if (hasNCode && hasFsbr) {
       return '무코드 수신 $nCodeCount건 이후 전상용제동(FSB) 체결 흐름이 확인됩니다.$timeSuffix';
@@ -1124,6 +1124,10 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         'S_OPEN-L': findIdx('S_OPEN-L'),
         'S_OPEN-R': findIdx('S_OPEN-R'),
         'S_CLOSE': findIdx('S_CLOSE'),
+      };
+      final autoDoorOpenCommands = <String, List<int>>{
+        '좌측': findIndices(['ATC1/2OPEN-L', 'ATC1OPEN-L', 'ATC2OPEN-L']),
+        '우측': findIndices(['ATC1/2OPEN-R', 'ATC1OPEN-R', 'ATC2OPEN-R']),
       };
 
       final eventButtons = <String, int>{
@@ -1367,6 +1371,32 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                 doorCloseReopenLogged = true;
                 lastDoorCycleHadDelay = true;
               }
+            }
+          }
+        }
+
+        final autoModeIdx = modeIndices[OperationMode.auto] ?? -1;
+        final isAutoMode =
+            autoModeIdx != -1 && _getVal(curr, autoModeIdx) == '1';
+        if (isAutoMode) {
+          for (final entry in autoDoorOpenCommands.entries) {
+            if (_isAnyRisingEdge(prev, curr, entry.value)) {
+              rowHadDoorActivity = true;
+              rowHadDoorCycle = true;
+              if (activeStop != null && isStopped) {
+                activeStop.hadDoorActivity = true;
+                activeStop.hadDoorCycle = true;
+              }
+              tempLogs.add(
+                LogEntry(
+                  time: time,
+                  message:
+                      '자동운전 ${entry.key} 출입문 개방 명령, ${_allDoorCloseText(currAdcValue)}',
+                  type: EntryType.button,
+                  isSummary: true,
+                ),
+              );
+              lastDoorContextAt = rowClock;
             }
           }
         }
