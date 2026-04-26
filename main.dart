@@ -974,6 +974,8 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       logs = [];
       blocks = [];
       summaryText = '';
+      _sourceRows = null;
+      _sourceFileSummary = '';
       statusText = result.files.length == 2
           ? '파일 2개 병합 중...'
           : '전동차 운행로그를 분석 중입니다...';
