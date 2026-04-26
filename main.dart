@@ -38,8 +38,6 @@ const Duration kNCodeWarnDelay = Duration(seconds: 4);
 const Duration kNCodeSummaryInterval = Duration(seconds: 30);
 const Duration kLongPersistenceDuration = Duration(seconds: 120);
 const Duration kDoorCloseDelayWarnDuration = Duration(seconds: 5);
-const String kLatestBuildDateLabel = '최신 반영: 2026-04-25';
-
 const List<int> kEffectiveDoorCars = [0, 1, 2, 7];
 const List<String> kActiveDoors = ['DOOR0', 'DOOR1', 'DOOR2', 'DOOR7'];
 
@@ -1921,15 +1919,6 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                   statusText,
                   style: const TextStyle(fontSize: 12, color: Colors.blueGrey),
                 ),
-                const SizedBox(height: 4),
-                const Text(
-                  kLatestBuildDateLabel,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.blueGrey,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
               ],
             ),
           ),
@@ -2013,13 +2002,26 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                   const SizedBox(height: 20),
                   Align(
                     alignment: Alignment.centerRight,
-                    child: Text(
-                      '제작자: 강경현',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: Colors.black.withValues(alpha: 0.72),
-                        fontWeight: FontWeight.w500,
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          '제작자: 강경현',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.black.withValues(alpha: 0.72),
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        Text(
+                          '검토: 김정주',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.black.withValues(alpha: 0.60),
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
