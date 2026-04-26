@@ -449,7 +449,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     return station == null ? ' (현재 역: 미확인)' : ' (현재 역: $station)';
   }
 
-  String _allDoorCloseText(String adcValue) => 'ALL DOOR CLOSE "$adcValue"';
+  String _allDoorCloseText(String adcValue) => '전체 출입문 닫힘 "$adcValue"';
 
   String _doorButtonActionLabel(String signal) {
     switch (signal) {
@@ -754,7 +754,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final messages = entries.map((entry) => entry.message).join('\n');
     final hasDoor = messages.contains('전체 출입문 닫힘') || messages.contains('출입문');
     final hasDoorCloseCycle =
-        messages.contains('ALL DOOR CLOSE') ||
+        messages.contains('전체 출입문 닫힘') ||
         messages.contains('기관사 닫힘버튼 취급');
     final hasMode = messages.contains('전환된 정황');
     final hasFsbr = messages.contains('전상용제동(FSB) 체결');
@@ -768,7 +768,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final nCodeCount = _countMessages(entries, '무코드');
     final fsbrCount = _countMessages(entries, '전상용제동(FSB) 체결');
     final modeCount = _countMessages(entries, '전환된 정황');
-    final doorCloseCycleCount = _countMessages(entries, 'ALL DOOR CLOSE');
+    final doorCloseCycleCount = _countMessages(entries, '전체 출입문 닫힘');
     final timeSuffix = _summaryTimeSuffix(entries);
 
     if (hasNCode && hasFsbr && hasMode) {
