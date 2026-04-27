@@ -272,13 +272,14 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         bytes[3] == 0xE0;
   }
 
-  Future<List<List<dynamic>>> _readLegacyXlsRows(
+  Future<List<List<dynamic>>> _readRowsWithJsWorkbookParser(
     String fileName,
     Uint8List bytes,
+    String failureMessage,
   ) async {
     try {
       if (!_grtcCanReadLegacyXls()) {
-        throw '구형 Excel 파서가 준비되지 않았습니다.';
+        throw 'Excel 호환 파서가 준비되지 않았습니다.';
       }
 
       final result = await _grtcReadXlsRowsFromBase64(
@@ -296,8 +297,31 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
             [row?.toString().trim() ?? ''],
       ];
     } catch (error) {
-      throw '$fileName 구형 Excel(.xls) 자동 변환에 실패했습니다. Excel에서 “다른 이름으로 저장 → Excel 통합 문서(.xlsx)”로 변환 후 업로드해 주세요. ($error)';
+      throw '$fileName $failureMessage ($error)';
     }
+  }
+
+  Future<List<List<dynamic>>> _readLegacyXlsRows(
+    String fileName,
+    Uint8List bytes,
+  ) {
+    return _readRowsWithJsWorkbookParser(
+      fileName,
+      bytes,
+      '구형 Excel(.xls) 자동 변환에 실패했습니다. Excel에서 “다른 이름으로 저장 → Excel 통합 문서(.xlsx)”로 변환 후 업로드해 주세요.',
+    );
+  }
+
+  Future<List<List<dynamic>>> _readXlsxRowsWithJsFallback(
+    String fileName,
+    Uint8List bytes,
+    Object originalError,
+  ) {
+    return _readRowsWithJsWorkbookParser(
+      fileName,
+      bytes,
+      '엑셀 파일을 호환 파서로 읽는 데 실패했습니다. Excel에서 다시 저장한 뒤 업로드해 주세요. 원래 오류: $originalError',
+    );
   }
 
   String _cellToStr(dynamic cell) {
@@ -1629,24 +1653,31 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       rows.addAll(await _readLegacyXlsRows(file.name, bytes));
     } else if (bytes.length > 2 && bytes[0] == 0x50 && bytes[1] == 0x4B) {
       await _allowUiRefresh('${file.name} 엑셀 파일을 읽는 중입니다...');
-      final excel = Excel.decodeBytes(bytes);
-      if (excel.tables.isEmpty) {
-        throw '${file.name} 엑셀 시트를 찾을 수 없습니다.';
-      }
-      var table = excel.tables.values.first;
-      for (final sheet in excel.tables.values) {
-        if (sheet.maxRows > 0) {
-          table = sheet;
-          break;
+      try {
+        final excel = Excel.decodeBytes(bytes);
+        if (excel.tables.isEmpty) {
+          throw '${file.name} 엑셀 시트를 찾을 수 없습니다.';
         }
-      }
-      var rowCount = 0;
-      for (final row in table.rows) {
-        rows.add(row.toList());
-        rowCount++;
-        if (rowCount % kUiYieldInterval == 0) {
-          await _allowUiRefresh('${file.name} 엑셀 데이터를 읽는 중입니다... ($rowCount행)');
+        var table = excel.tables.values.first;
+        for (final sheet in excel.tables.values) {
+          if (sheet.maxRows > 0) {
+            table = sheet;
+            break;
+          }
         }
+        var rowCount = 0;
+        for (final row in table.rows) {
+          rows.add(row.toList());
+          rowCount++;
+          if (rowCount % kUiYieldInterval == 0) {
+            await _allowUiRefresh(
+              '${file.name} 엑셀 데이터를 읽는 중입니다... ($rowCount행)',
+            );
+          }
+        }
+      } catch (error) {
+        await _allowUiRefresh('${file.name} 엑셀 파일을 호환 파서로 다시 읽는 중입니다...');
+        rows.addAll(await _readXlsxRowsWithJsFallback(file.name, bytes, error));
       }
     } else {
       final lines = utf8
