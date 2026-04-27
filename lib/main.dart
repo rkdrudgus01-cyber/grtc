@@ -54,6 +54,7 @@ const Duration kDoorOpenDelayWarnDuration = Duration(seconds: 5);
 const Duration kDoorBypassHoldWarnDuration = Duration(seconds: 3);
 const Duration kDepartureMovementConfirmDuration = Duration(seconds: 3);
 const Duration kModeConflictConfirmDuration = Duration(seconds: 3);
+const Duration kSignalSpikeIgnoreDuration = Duration(seconds: 3);
 const int kUiYieldInterval = 250;
 
 const List<int> kEffectiveDoorCars = [0, 1, 2, 7];
@@ -244,6 +245,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
   String reportText = '';
   bool isLoading = false;
   LogViewMode viewMode = LogViewMode.detail;
+  List<_ParsedLogFile> _lastParsedFiles = const [];
   final TextEditingController _startTimeController = TextEditingController();
   final TextEditingController _endTimeController = TextEditingController();
 
@@ -294,6 +296,41 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
   bool _isRisingEdge(List<dynamic> prev, List<dynamic> curr, int idx) {
     if (idx == -1) return false;
     return _getVal(prev, idx) == '0' && _getVal(curr, idx) == '1';
+  }
+
+  bool _isSustainedValueAt(
+    List<List<dynamic>> rows,
+    int startIndex,
+    int idx,
+    int timeIdx,
+    String targetValue,
+    Duration minDuration,
+  ) {
+    if (idx == -1 ||
+        startIndex < 0 ||
+        startIndex >= rows.length ||
+        _getVal(rows[startIndex], idx) != targetValue) {
+      return false;
+    }
+
+    var duration = Duration.zero;
+    for (var j = startIndex + 1; j < rows.length; j++) {
+      final prevRow = rows[j - 1];
+      final currRow = rows[j];
+      if (_getVal(prevRow, idx) != targetValue) break;
+
+      final prevTime = timeIdx != -1 && timeIdx < prevRow.length
+          ? _cellToStr(prevRow[timeIdx])
+          : '';
+      final currTime = timeIdx != -1 && timeIdx < currRow.length
+          ? _cellToStr(currRow[timeIdx])
+          : '';
+      duration += _resolveSampleDelta(prevTime, currTime);
+      if (duration >= minDuration) return true;
+      if (_getVal(currRow, idx) != targetValue) break;
+    }
+
+    return false;
   }
 
   List<OperationMode> _activeModes(
@@ -503,6 +540,13 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       }
     }
     return cars;
+  }
+
+  List<String> _activeDoorBypassCarsFromValues(Map<String, String> doorValues) {
+    return doorValues.entries
+        .where((entry) => entry.value == '0')
+        .map((entry) => '${entry.key.replaceFirst('DOOR', '')}호차')
+        .toList();
   }
 
   List<String> _doorBypassTargetCars(
@@ -1623,11 +1667,14 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       blocks = [];
       summaryText = '';
       reportText = '';
+      _lastParsedFiles = const [];
       statusText = '전동차 운행로그를 분석 중입니다...';
     });
     await Future<void>.delayed(const Duration(milliseconds: 16));
 
     try {
+      _startTimeController.clear();
+      _endTimeController.clear();
       final parsedFiles = <_ParsedLogFile>[];
       for (var fileIndex = 0; fileIndex < result.files.length; fileIndex++) {
         final file = result.files[fileIndex];
@@ -1642,6 +1689,44 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         );
       }
 
+      _lastParsedFiles = List.unmodifiable(parsedFiles);
+      await _analyzeParsedFiles(parsedFiles);
+    } catch (e) {
+      setState(() {
+        isLoading = false;
+        statusText = '오류: $e';
+      });
+    }
+  }
+
+  Future<void> _reAnalyzeSelectedTime() async {
+    if (_lastParsedFiles.isEmpty) return;
+    try {
+      final start = _parseTimeFilterText(_startTimeController.text);
+      final end = _parseTimeFilterText(_endTimeController.text);
+      if (start != null && end != null && start > end) {
+        throw '종료 시간은 시작 시간 이후로 입력해 주세요.';
+      }
+    } catch (e) {
+      setState(() {
+        statusText = '오류: $e';
+      });
+      return;
+    }
+    setState(() {
+      isLoading = true;
+      logs = [];
+      blocks = [];
+      summaryText = '';
+      reportText = '';
+      statusText = '선택 시간대를 기준으로 재분석 중입니다...';
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 16));
+    await _analyzeParsedFiles(_lastParsedFiles);
+  }
+
+  Future<void> _analyzeParsedFiles(List<_ParsedLogFile> parsedFiles) async {
+    try {
       final preparedRows = _prepareLogRows(parsedFiles);
       final rows = preparedRows.rows;
 
@@ -1745,9 +1830,20 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       final tempLogs = <LogEntry>[];
 
       final firstDataRow = rows.length > 1 ? rows[1] : const <dynamic>[];
-      bool adcOpen = idxAdc != -1 && _getVal(firstDataRow, idxAdc) == '0';
-      bool emegrActive =
-          idxEmegr != -1 && _getVal(firstDataRow, idxEmegr) == '1';
+      var stableAdcValue = idxAdc != -1 ? _getVal(firstDataRow, idxAdc) : '1';
+      var stableEmegrValue = idxEmegr != -1
+          ? _getVal(firstDataRow, idxEmegr)
+          : '0';
+      bool emegrActive = stableEmegrValue == '1';
+      var stableAdbsValue = idxAdbs != -1
+          ? _getVal(firstDataRow, idxAdbs)
+          : '0';
+      final stableDoorValues = <String, String>{
+        for (final entry in doorIdx.entries)
+          entry.key: entry.value == -1
+              ? '1'
+              : _getVal(firstDataRow, entry.value),
+      };
       bool isStopped = false;
       bool nCodeActive =
           idxNCode != -1 && _getVal(firstDataRow, idxNCode) == '1';
@@ -1866,12 +1962,22 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
           }
         }
 
-        final prevAdcValue = idxAdc != -1
-            ? _getVal(prev, idxAdc)
-            : (adcOpen ? '0' : '1');
-        final currAdcValue = idxAdc != -1
+        final prevAdcValue = stableAdcValue;
+        final rawCurrAdcValue = idxAdc != -1
             ? _getVal(curr, idxAdc)
-            : prevAdcValue;
+            : stableAdcValue;
+        if (rawCurrAdcValue != stableAdcValue &&
+            _isSustainedValueAt(
+              rows,
+              i,
+              idxAdc,
+              tIdx,
+              rawCurrAdcValue,
+              kSignalSpikeIgnoreDuration,
+            )) {
+          stableAdcValue = rawCurrAdcValue;
+        }
+        final currAdcValue = stableAdcValue;
         bool rowHadDoorActivity = prevAdcValue == '1' && currAdcValue == '0';
         bool rowHadDoorCycle = false;
         final doorLocation = _doorLocationPrefix(
@@ -1941,7 +2047,19 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         }
 
         if (idxEmegr != -1) {
-          final currentEmegr = _getVal(curr, idxEmegr) == '1';
+          final rawEmegrValue = _getVal(curr, idxEmegr);
+          if (rawEmegrValue != stableEmegrValue &&
+              _isSustainedValueAt(
+                rows,
+                i,
+                idxEmegr,
+                tIdx,
+                rawEmegrValue,
+                kSignalSpikeIgnoreDuration,
+              )) {
+            stableEmegrValue = rawEmegrValue;
+          }
+          final currentEmegr = stableEmegrValue == '1';
           if (currentEmegr != emegrActive) {
             tempLogs.add(
               LogEntry(
@@ -2061,7 +2179,22 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
           }
         }
 
-        if (_isRisingEdge(prev, curr, idxAdbs)) {
+        final prevAdbsValue = stableAdbsValue;
+        final rawCurrAdbsValue = idxAdbs != -1
+            ? _getVal(curr, idxAdbs)
+            : stableAdbsValue;
+        if (rawCurrAdbsValue != stableAdbsValue &&
+            _isSustainedValueAt(
+              rows,
+              i,
+              idxAdbs,
+              tIdx,
+              rawCurrAdbsValue,
+              kSignalSpikeIgnoreDuration,
+            )) {
+          stableAdbsValue = rawCurrAdbsValue;
+        }
+        if (prevAdbsValue == '0' && stableAdbsValue == '1') {
           final bypassTargetCars = _doorBypassTargetCars(prev, curr, doorIdx);
           rowHadDoorActivity = true;
           rowHadDoorCycle = true;
@@ -2160,15 +2293,26 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
             }
             lastDoorContextAt = rowClock;
           }
-          adcOpen = currAdcValue == '0';
         }
 
         for (final entry in doorIdx.entries) {
           final idx = entry.value;
           if (idx == -1) continue;
 
-          final prevValue = _getVal(prev, idx);
-          final currValue = _getVal(curr, idx);
+          final prevValue = stableDoorValues[entry.key] ?? _getVal(prev, idx);
+          final rawCurrValue = _getVal(curr, idx);
+          if (rawCurrValue != prevValue &&
+              _isSustainedValueAt(
+                rows,
+                i,
+                idx,
+                tIdx,
+                rawCurrValue,
+                kSignalSpikeIgnoreDuration,
+              )) {
+            stableDoorValues[entry.key] = rawCurrValue;
+          }
+          final currValue = stableDoorValues[entry.key] ?? prevValue;
           if (prevValue == currValue) continue;
           if (currValue == '0') {
             final bypassTargetCars = _doorBypassTargetCars(prev, curr, doorIdx);
@@ -2182,7 +2326,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
               doorCloseBypassLogged = true;
               lastDoorCycleHadDelay = true;
             }
-          } else if (_activeDoorBypassCars(curr, doorIdx).isEmpty) {
+          } else if (_activeDoorBypassCarsFromValues(
+            stableDoorValues,
+          ).isEmpty) {
             doorBypassPending = false;
           }
 
@@ -2200,7 +2346,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         }
 
         if (doorClosePending) {
-          lastDoorCloseBypassCars = _activeDoorBypassCars(curr, doorIdx);
+          lastDoorCloseBypassCars = _activeDoorBypassCarsFromValues(
+            stableDoorValues,
+          );
           if (lastDoorCloseAt != null) {
             final elapsed = rowClock - lastDoorCloseAt;
             if (!doorCloseDelayLogged &&
@@ -2335,7 +2483,15 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
           nCodeActive = currNCode;
         }
 
-        if (_isRisingEdge(prev, curr, idxFsb)) {
+        if (_isRisingEdge(prev, curr, idxFsb) &&
+            _isSustainedValueAt(
+              rows,
+              i,
+              idxFsb,
+              tIdx,
+              '1',
+              kSignalSpikeIgnoreDuration,
+            )) {
           final activeSpeedCode = _activeAtcSpeedCode(curr, speedCodeIndices);
           tempLogs.add(
             LogEntry(
@@ -2714,38 +2870,50 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                     ),
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _startTimeController,
-                          enabled: !isLoading,
-                          decoration: const InputDecoration(
-                            labelText: '시작 시간',
-                            hintText: 'HH:mm:ss',
-                            isDense: true,
-                            border: OutlineInputBorder(),
+                if (logs.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _startTimeController,
+                            enabled: !isLoading,
+                            decoration: const InputDecoration(
+                              labelText: '시작 시간',
+                              hintText: 'HH:mm:ss',
+                              isDense: true,
+                              border: OutlineInputBorder(),
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: TextField(
-                          controller: _endTimeController,
-                          enabled: !isLoading,
-                          decoration: const InputDecoration(
-                            labelText: '종료 시간',
-                            hintText: 'HH:mm:ss',
-                            isDense: true,
-                            border: OutlineInputBorder(),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextField(
+                            controller: _endTimeController,
+                            enabled: !isLoading,
+                            decoration: const InputDecoration(
+                              labelText: '종료 시간',
+                              hintText: 'HH:mm:ss',
+                              isDense: true,
+                              border: OutlineInputBorder(),
+                            ),
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          height: 48,
+                          child: FilledButton.icon(
+                            onPressed: isLoading
+                                ? null
+                                : _reAnalyzeSelectedTime,
+                            icon: const Icon(Icons.manage_search, size: 18),
+                            label: const Text('시간 적용'),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
                 if (logs.isEmpty)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
