@@ -1482,7 +1482,16 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     if (bytes.length > 2 && bytes[0] == 0x50 && bytes[1] == 0x4B) {
       await _allowUiRefresh('${file.name} 엑셀 파일을 읽는 중입니다...');
       final excel = Excel.decodeBytes(bytes);
-      final table = excel.tables[excel.tables.keys.first]!;
+      if (excel.tables.isEmpty) {
+        throw '${file.name} 엑셀 시트를 찾을 수 없습니다.';
+      }
+      var table = excel.tables.values.first;
+      for (final sheet in excel.tables.values) {
+        if (sheet.maxRows > 0) {
+          table = sheet;
+          break;
+        }
+      }
       var rowCount = 0;
       for (final row in table.rows) {
         rows.add(row.toList());
@@ -2921,6 +2930,17 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         Text(
+                          '운행기록 원본이 Excel 97-2003(.xls) 형식인 경우,\nExcel에서 “다른 이름으로 저장 → Excel 통합 문서(.xlsx)”로 변환 후 업로드해 주세요.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.black.withValues(alpha: 0.82),
+                            fontWeight: FontWeight.w600,
+                            height: 1.45,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
                           '운행기록 분석을 보조하기 위한 시스템으로,\n최종 판단은 사용자의 확인이 필요합니다.',
                           textAlign: TextAlign.center,
                           style: TextStyle(
@@ -2939,7 +2959,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                               Text(
                                 '제작자: 강경현',
                                 style: const TextStyle(
-                                  fontSize: 15,
+                                  fontSize: 13.5,
                                   color: Colors.black,
                                   fontWeight: FontWeight.w700,
                                 ),
@@ -2947,7 +2967,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                               Text(
                                 '검토: 김정주',
                                 style: const TextStyle(
-                                  fontSize: 15,
+                                  fontSize: 13.5,
                                   color: Colors.black,
                                   fontWeight: FontWeight.w700,
                                 ),
@@ -3317,7 +3337,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
           ],
         ),
         content: const Text(
-          'Excel 97-2003(.xls) 형식은 지원하지 않습니다. .xlsx 또는 .csv로 변환한 뒤 다시 업로드해 주세요.',
+          '운행기록 원본이 Excel 97-2003(.xls) 형식인 경우,\nExcel에서 “다른 이름으로 저장 → Excel 통합 문서(.xlsx)”로 변환 후 업로드해 주세요.',
         ),
         actions: [
           TextButton(
