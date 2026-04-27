@@ -1,17 +1,14 @@
-# grtc_dial_generator
+# grtc 운행로그 분석기
 
-A new Flutter project.
+광주교통공사 전동차 운행기록을 웹에서 분석하기 위한 Flutter Web 프로젝트입니다.
 
-## Getting Started
+## 배포
 
-This project is a starting point for a Flutter application.
+- GitHub Pages: https://rkdrudgus01-cyber.github.io/grtc/
+- 배포 폴더: `docs`
+- 빌드 명령: `flutter build web --base-href /grtc/ --pwa-strategy=none`
 
-A few resources to get you started if this is your first Flutter project:
+## 프로젝트 분리 기준
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+- 이 저장소는 운행로그 분석기 전용입니다.
+- 다이얼 생성기 관련 파일은 `D:\GRTC\dial-generator`에서 별도로 관리합니다.

@@ -2770,18 +2770,18 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                             children: [
                               Text(
                                 '제작자: 강경현',
-                                style: TextStyle(
-                                  fontSize: 13,
+                                style: const TextStyle(
+                                  fontSize: 15,
                                   color: Colors.black,
-                                  fontWeight: FontWeight.w500,
+                                  fontWeight: FontWeight.w700,
                                 ),
                               ),
                               Text(
                                 '검토: 김정주',
-                                style: TextStyle(
-                                  fontSize: 13,
+                                style: const TextStyle(
+                                  fontSize: 15,
                                   color: Colors.black,
-                                  fontWeight: FontWeight.w500,
+                                  fontWeight: FontWeight.w700,
                                 ),
                               ),
                             ],
@@ -2864,7 +2864,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                           borderRadius: BorderRadius.circular(8),
                           constraints: const BoxConstraints(
                             minHeight: 36,
-                            minWidth: 52,
+                            minWidth: 64,
                           ),
                           children: const [
                             Padding(
