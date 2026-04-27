@@ -673,10 +673,10 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
   }) {
     final label = _doorButtonActionLabel(signal);
     final locationSuffix = _currentStationSuffix(location);
-    if (signal == 'CLOSE' ||
-        signal == 'S_CLOSE' ||
-        signal == 'REOPEN' ||
-        signal == 'S_REOPEN') {
+    if (signal == 'CLOSE' || signal == 'S_CLOSE') {
+      return '$label$locationSuffix';
+    }
+    if (signal == 'REOPEN' || signal == 'S_REOPEN') {
       return '$label, ${_adcReportValue(adcValue)}${_doorModeSuffix(doorMode)}$locationSuffix';
     }
     return '$label$locationSuffix';
@@ -1033,13 +1033,13 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
   String _incidentTypeLabel(IncidentType type) {
     switch (type) {
       case IncidentType.doorCloseFailure:
-        return '출입문 닫힘 불량 정황';
+        return '출입문 닫히지 않음 발생 정황';
       case IncidentType.doorOpenFailure:
-        return '출입문 열림 불량 정황';
+        return '출입문 열림불량 발생 정황';
       case IncidentType.doorBypass:
-        return '출입문 바이패스 취급 정황';
+        return '출입문 바이패스 현시/취급 정황';
       case IncidentType.ncodeEmergency:
-        return '무코드/비상운전 흐름';
+        return '속도코드 무코드 발생 및 비상운전 흐름';
       case IncidentType.brake:
         return '전상용제동(FSB) 체결 흐름';
       case IncidentType.modeChange:
@@ -1070,9 +1070,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final hasFsbr = messages.contains('전상용제동(FSB) 체결');
     final hasMode = messages.contains('전환된 정황');
 
+    if (hasDoorCloseFailure) return IncidentType.doorCloseFailure;
     if (hasDoorOpenFailure) return IncidentType.doorOpenFailure;
     if (hasDoorBypass) return IncidentType.doorBypass;
-    if (hasDoorCloseFailure) return IncidentType.doorCloseFailure;
     if (hasNCode && (hasFsbr || hasEmergency)) {
       return IncidentType.ncodeEmergency;
     }
@@ -1117,14 +1117,27 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       _reportDigestLine(
         entries: entries,
         keywords: ['출입문 바이패스', '바이패스 취급'],
-        label: '출입문 바이패스 취급',
+        label: '출입문 바이패스 현시/취급',
       ),
       _reportDigestLine(
         entries: entries,
-        keywords: ['전체 출입문 닫힘 신호 미형성', '불일치', '지연'],
-        label: '출입문 신호 미형성/지연 정황',
+        keywords: [
+          '전체 출입문 닫힘 신호 미형성',
+          '전체 출입문 닫힘 신호가 형성되지',
+          '닫힘버튼 취급, ALL DOOR CLOSE "0"',
+        ],
+        label: '출입문 닫히지 않음 정황',
       ),
-      _reportDigestLine(entries: entries, keywords: ['무코드'], label: '무코드 수신'),
+      _reportDigestLine(
+        entries: entries,
+        keywords: ['출입문 열림 지연', '열림 버튼 취급 후에도 ALL DOOR CLOSE "1" 유지'],
+        label: '출입문 열림불량 정황',
+      ),
+      _reportDigestLine(
+        entries: entries,
+        keywords: ['무코드'],
+        label: '속도코드 무코드 발생',
+      ),
       _reportDigestLine(
         entries: entries,
         keywords: ['전상용제동(FSB) 체결'],
@@ -1133,7 +1146,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       _reportDigestLine(
         entries: entries,
         keywords: ['속도코드', '과속'],
-        label: '속도코드 초과 정황',
+        label: 'ATC-과속검지 정황',
       ),
       _reportDigestLine(
         entries: entries,
@@ -1174,8 +1187,8 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     if (_isGenericReportEvent(entry)) return 100;
     if (message.contains('바이패스') ||
         message.contains('전체 출입문 닫힘 신호 미형성') ||
+        message.contains('전체 출입문 닫힘 신호가 형성되지') ||
         message.contains('불일치') ||
-        message.contains('지연') ||
         message.contains('운전모드 신호 불일치') ||
         message.contains('이동 중 ALL DOOR CLOSE')) {
       return 0;
@@ -1194,6 +1207,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     if (message.contains('열림 버튼 취급') ||
         message.contains('닫힘버튼 취급') ||
         message.contains('재개폐 버튼 취급') ||
+        message.contains('출입문 열림 지연') ||
         message.contains('ALL DOOR CLOSE "0"')) {
       return 2;
     }
@@ -1295,10 +1309,18 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final summary = _buildSummary(entries);
     final digestLines = _buildReportDigest(entries);
     final firstLines = [
-      _firstLine(entries, ['열림 버튼 취급', 'ALL DOOR CLOSE "0"'], '출입문 열림 관련 신호'),
-      _firstLine(entries, ['닫힘버튼 취급', 'ALL DOOR CLOSE "1"'], '출입문 닫힘 관련 신호'),
+      _firstLine(
+        entries,
+        ['출입문 열림 지연', '열림 버튼 취급 후에도 ALL DOOR CLOSE "1" 유지'],
+        '출입문 열림불량 관련 신호',
+      ),
+      _firstLine(
+        entries,
+        ['닫힘버튼 취급, ALL DOOR CLOSE "0"', '전체 출입문 닫힘 신호가 형성되지'],
+        '출입문 닫히지 않음 관련 신호',
+      ),
       _firstLine(entries, ['출입문 바이패스', '바이패스 취급'], '출입문 바이패스'),
-      _firstLine(entries, ['무코드'], '무코드 수신'),
+      _firstLine(entries, ['무코드'], '속도코드 무코드 발생'),
       _firstLine(entries, ['전상용제동(FSB) 체결'], '전상용제동(FSB) 체결'),
       _firstLine(entries, ['전환된 정황'], '운전모드 전환'),
     ].where((line) => line.isNotEmpty).toList();
