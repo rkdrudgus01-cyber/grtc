@@ -406,11 +406,28 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     }
   }
 
+  String _modeReportLabel(OperationMode mode) {
+    switch (mode) {
+      case OperationMode.auto:
+        return '자동';
+      case OperationMode.driverless:
+        return '무인';
+      case OperationMode.manual:
+        return '수동';
+      case OperationMode.emergency:
+        return '비상';
+      case OperationMode.yard:
+        return '기지';
+      case OperationMode.unknown:
+        return '미상';
+    }
+  }
+
   String _modeTransitionMessage(OperationMode? prev, OperationMode curr) {
     if (prev == null) {
-      return '${_modeLabel(curr)}으로 전환된 정황이 확인됩니다.';
+      return '운전모드 ${_modeReportLabel(curr)} 전환';
     }
-    return '${_modeLabel(prev)}에서 ${_modeLabel(curr)}으로 전환된 정황이 확인됩니다.';
+    return '운전모드 ${_modeReportLabel(prev)}→${_modeReportLabel(curr)} 전환';
   }
 
   Duration? _parseLogTime(String raw) {
@@ -739,6 +756,10 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     return labels.first;
   }
 
+  bool _isResolvedDoorMode(String doorMode) {
+    return doorMode == '자/자' || doorMode == '자/수' || doorMode == '수/수';
+  }
+
   String _signalName(String key) => kSignalDisplayNames[key] ?? key;
 
   bool _isBlockRelevantLog(LogEntry entry) {
@@ -1010,6 +1031,16 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     return entries.where((entry) => entry.message.contains(keyword)).length;
   }
 
+  bool _isOperationModeTransitionMessage(String message) {
+    return RegExp(
+      r'^운전모드 (자동|무인|수동|비상|기지|미상)(?:→(자동|무인|수동|비상|기지|미상))? 전환',
+    ).hasMatch(message);
+  }
+
+  bool _isDoorModeTransitionMessage(String message) {
+    return RegExp(r'^출입문 모드 (자/자|자/수|수/수)→(자/자|자/수|수/수) 전환').hasMatch(message);
+  }
+
   String _firstMatchingTime(List<LogEntry> entries, List<String> keywords) {
     for (final entry in entries) {
       final time = entry.time.trim();
@@ -1068,7 +1099,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final hasNCode = messages.contains('무코드');
     final hasEmergency = messages.contains('비상운전') || messages.contains('비상모드');
     final hasFsbr = messages.contains('전상용제동(FSB) 체결');
-    final hasMode = messages.contains('전환된 정황');
+    final hasMode = entries.any(
+      (entry) => _isOperationModeTransitionMessage(entry.message),
+    );
 
     if (hasDoorCloseFailure) return IncidentType.doorCloseFailure;
     if (hasDoorOpenFailure) return IncidentType.doorOpenFailure;
@@ -1092,12 +1125,41 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     return '- 최초 $label: $time';
   }
 
+  String _firstLineWhere(
+    List<LogEntry> entries,
+    bool Function(String message) predicate,
+    String label,
+  ) {
+    final time = _firstMatchingTimeWhere(entries, predicate);
+    if (time.isEmpty) return '';
+    return '- 최초 $label: $time';
+  }
+
   int _countAnyMessages(List<LogEntry> entries, List<String> keywords) {
     return entries
         .where(
           (entry) => keywords.any((keyword) => entry.message.contains(keyword)),
         )
         .length;
+  }
+
+  int _countWhereMessages(
+    List<LogEntry> entries,
+    bool Function(String message) predicate,
+  ) {
+    return entries.where((entry) => predicate(entry.message)).length;
+  }
+
+  String _firstMatchingTimeWhere(
+    List<LogEntry> entries,
+    bool Function(String message) predicate,
+  ) {
+    for (final entry in entries) {
+      final time = entry.time.trim();
+      if (time.isEmpty || time == '-') continue;
+      if (predicate(entry.message)) return time;
+    }
+    return '';
   }
 
   String _reportDigestLine({
@@ -1108,6 +1170,18 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final count = _countAnyMessages(entries, keywords);
     if (count == 0) return '';
     final firstTime = _firstMatchingTime(entries, keywords);
+    final firstText = firstTime.isEmpty ? '' : ', 최초 $firstTime';
+    return '- $label: $count건$firstText';
+  }
+
+  String _reportDigestLineWhere({
+    required List<LogEntry> entries,
+    required bool Function(String message) predicate,
+    required String label,
+  }) {
+    final count = _countWhereMessages(entries, predicate);
+    if (count == 0) return '';
+    final firstTime = _firstMatchingTimeWhere(entries, predicate);
     final firstText = firstTime.isEmpty ? '' : ', 최초 $firstTime';
     return '- $label: $count건$firstText';
   }
@@ -1158,10 +1232,15 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         keywords: ['TWC/TB'],
         label: 'TWC/TB 정위치 조건 의심',
       ),
-      _reportDigestLine(
+      _reportDigestLineWhere(
         entries: entries,
-        keywords: ['전환된 정황'],
+        predicate: _isOperationModeTransitionMessage,
         label: '운전모드 전환',
+      ),
+      _reportDigestLineWhere(
+        entries: entries,
+        predicate: _isDoorModeTransitionMessage,
+        label: '출입문 모드 전환',
       ),
       _reportDigestLine(
         entries: entries,
@@ -1195,13 +1274,14 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     }
     if (message.contains('무코드') ||
         message.contains('전상용제동(FSB) 체결') ||
-        message.contains('전환된 정황') ||
+        _isOperationModeTransitionMessage(message) ||
         message.contains('비상모드') ||
         message.contains('비상운전') ||
         message.contains('정차 위치') ||
         message.contains('잔여거리') ||
         message.contains('속도코드') ||
-        message.contains('TWC/TB')) {
+        message.contains('TWC/TB') ||
+        _isDoorModeTransitionMessage(message)) {
       return 1;
     }
     if (message.contains('열림 버튼 취급') ||
@@ -1227,13 +1307,14 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       return 'door_mismatch';
     }
     if (message.contains('열림')) return 'door_open';
+    if (_isDoorModeTransitionMessage(message)) return 'door_mode_change';
     if (message.contains('닫힘') || message.contains('ALL DOOR CLOSE')) {
       return 'door_close';
     }
     if (message.contains('무코드')) return 'ncode';
     if (message.contains('전상용제동(FSB) 체결')) return 'fsb';
     if (message.contains('속도코드')) return 'speed_code';
-    if (message.contains('전환된 정황')) return 'mode_change';
+    if (_isOperationModeTransitionMessage(message)) return 'mode_change';
     if (message.contains('비상모드') || message.contains('비상운전')) {
       return 'emergency';
     }
@@ -1309,20 +1390,19 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final summary = _buildSummary(entries);
     final digestLines = _buildReportDigest(entries);
     final firstLines = [
-      _firstLine(
-        entries,
-        ['출입문 열림 지연', '열림 버튼 취급 후에도 ALL DOOR CLOSE "1" 유지'],
-        '출입문 열림불량 관련 신호',
-      ),
-      _firstLine(
-        entries,
-        ['닫힘버튼 취급, ALL DOOR CLOSE "0"', '전체 출입문 닫힘 신호가 형성되지'],
-        '출입문 닫히지 않음 관련 신호',
-      ),
+      _firstLine(entries, [
+        '출입문 열림 지연',
+        '열림 버튼 취급 후에도 ALL DOOR CLOSE "1" 유지',
+      ], '출입문 열림불량 관련 신호'),
+      _firstLine(entries, [
+        '닫힘버튼 취급, ALL DOOR CLOSE "0"',
+        '전체 출입문 닫힘 신호가 형성되지',
+      ], '출입문 닫히지 않음 관련 신호'),
       _firstLine(entries, ['출입문 바이패스', '바이패스 취급'], '출입문 바이패스'),
       _firstLine(entries, ['무코드'], '속도코드 무코드 발생'),
       _firstLine(entries, ['전상용제동(FSB) 체결'], '전상용제동(FSB) 체결'),
-      _firstLine(entries, ['전환된 정황'], '운전모드 전환'),
+      _firstLineWhere(entries, _isOperationModeTransitionMessage, '운전모드 전환'),
+      _firstLineWhere(entries, _isDoorModeTransitionMessage, '출입문 모드 전환'),
     ].where((line) => line.isNotEmpty).toList();
 
     final summaryEntries = _selectReportEvents(entries)
@@ -1396,7 +1476,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         messages.contains('ALL DOOR CLOSE "0"');
     final hasDoorBypass =
         messages.contains('출입문 바이패스') || messages.contains('바이패스 취급');
-    final hasMode = messages.contains('전환된 정황');
+    final hasMode = entries.any(
+      (entry) => _isOperationModeTransitionMessage(entry.message),
+    );
     final hasFsbr = messages.contains('전상용제동(FSB) 체결');
     final hasNCode = messages.contains('무코드');
     final hasStop =
@@ -1407,7 +1489,10 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         messages.contains('출발 허가');
     final nCodeCount = _countMessages(entries, '무코드');
     final fsbrCount = _countMessages(entries, '전상용제동(FSB) 체결');
-    final modeCount = _countMessages(entries, '전환된 정황');
+    final modeCount = _countWhereMessages(
+      entries,
+      _isOperationModeTransitionMessage,
+    );
     final doorCloseCycleCount =
         _countMessages(entries, '닫힘버튼 취급') +
         _countMessages(entries, 'ALL DOOR CLOSE "1"');
@@ -1419,7 +1504,10 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         _countMessages(entries, '바이패스 취급');
     final firstNCodeTime = _firstMatchingTime(entries, ['무코드']);
     final firstFsbrTime = _firstMatchingTime(entries, ['전상용제동(FSB) 체결']);
-    final firstModeTime = _firstMatchingTime(entries, ['전환된 정황']);
+    final firstModeTime = _firstMatchingTimeWhere(
+      entries,
+      _isOperationModeTransitionMessage,
+    );
     final firstDoorCloseTime = _firstMatchingTime(entries, [
       '닫힘버튼 취급',
       'ALL DOOR CLOSE "1"',
@@ -1586,12 +1674,42 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
   Duration? _parseTimeFilterText(String value) {
     final text = value.trim();
     if (text.isEmpty) return null;
-    if (!RegExp(r'^\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?$').hasMatch(text)) {
-      throw '시간 형식은 HH:mm:ss로 입력해 주세요.';
+
+    Duration? parseParts(
+      String hourText,
+      String minuteText,
+      String secondText,
+    ) {
+      final hours = int.parse(hourText);
+      final minutes = int.parse(minuteText);
+      final seconds = int.parse(secondText);
+      if (hours >= 24 || minutes >= 60 || seconds >= 60) return null;
+      return Duration(hours: hours, minutes: minutes, seconds: seconds);
     }
-    final parsed = _parseLogTime(text);
+
+    final hhmmss = RegExp(
+      r'^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$',
+    ).firstMatch(text);
+    final compactHhmmss = RegExp(r'^(\d{2})(\d{2})(\d{2})$').firstMatch(text);
+    final compactHhmm = RegExp(r'^(\d{2})(\d{2})$').firstMatch(text);
+
+    final Duration? parsed;
+    if (hhmmss != null) {
+      parsed = parseParts(hhmmss.group(1)!, hhmmss.group(2)!, hhmmss.group(3)!);
+    } else if (compactHhmmss != null) {
+      parsed = parseParts(
+        compactHhmmss.group(1)!,
+        compactHhmmss.group(2)!,
+        compactHhmmss.group(3)!,
+      );
+    } else if (compactHhmm != null) {
+      parsed = parseParts(compactHhmm.group(1)!, compactHhmm.group(2)!, '0');
+    } else {
+      parsed = null;
+    }
+
     if (parsed == null) {
-      throw '시간 형식은 HH:mm:ss로 입력해 주세요.';
+      throw '시간 형식은 HH:mm:ss, HHmmss 또는 HHmm으로 입력해 주세요.';
     }
     return parsed;
   }
@@ -1944,6 +2062,10 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
           : null;
       bool modeConflictLogged = false;
       List<OperationMode> modeConflictModes = initialActiveModes;
+      final initialDoorMode = _doorModeLabel(firstDataRow, doorModeIndices);
+      String? lastKnownDoorMode = _isResolvedDoorMode(initialDoorMode)
+          ? initialDoorMode
+          : null;
       int? lastDoorCloseIndex;
       String? lastDoorCloseLocation;
       String? lastDoorCloseMode;
@@ -2040,6 +2162,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         final currAdcValue = stableAdcValue;
         bool rowHadDoorActivity = prevAdcValue == '1' && currAdcValue == '0';
         bool rowHadDoorCycle = false;
+        bool rowHadAutoDoorOpenCommand = false;
         final doorLocation = _doorLocationPrefix(
           isStopped: isStopped,
           lastBerthedStation: lastBerthedStation,
@@ -2047,6 +2170,22 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
           direction: travelDirection,
         );
         final currentDoorMode = _doorModeLabel(curr, doorModeIndices);
+        if (_isResolvedDoorMode(currentDoorMode)) {
+          if (lastKnownDoorMode != null &&
+              lastKnownDoorMode != currentDoorMode) {
+            tempLogs.add(
+              LogEntry(
+                time: time,
+                message:
+                    '출입문 모드 $lastKnownDoorMode→$currentDoorMode 전환${_currentStationSuffix(doorLocation)}',
+                type: EntryType.info,
+                isSummary: true,
+              ),
+            );
+            lastDoorContextAt = rowClock;
+          }
+          lastKnownDoorMode = currentDoorMode;
+        }
 
         final activeModes = _activeModes(curr, modeIndices);
         final hasModeConflict = activeModes.length > 1;
@@ -2215,6 +2354,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
               final label = _autoDoorOpenCommandLabel(entry.key);
               rowHadDoorActivity = true;
               rowHadDoorCycle = true;
+              rowHadAutoDoorOpenCommand = true;
               final stop = activeStop;
               if (stop != null && isStopped) {
                 stop.hadDoorActivity = true;
@@ -2304,7 +2444,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                   ),
                 );
                 doorOpenPending = false;
-              } else {
+              } else if (!rowHadAutoDoorOpenCommand) {
                 tempLogs.add(
                   LogEntry(
                     time: time,
