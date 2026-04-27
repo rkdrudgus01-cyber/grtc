@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:js_interop';
 
 import 'package:excel/excel.dart' hide Border;
 import 'package:file_picker/file_picker.dart';
@@ -12,6 +13,12 @@ void main() => runApp(
     theme: ThemeData(fontFamily: 'NotoSansKR', useMaterial3: false),
   ),
 );
+
+@JS('grtcCanReadLegacyXls')
+external bool _grtcCanReadLegacyXls();
+
+@JS('grtcReadXlsRowsFromBase64')
+external JSPromise<JSAny?> _grtcReadXlsRowsFromBase64(JSString base64);
 
 enum EntryType { button, bypass, restore, info }
 
@@ -240,7 +247,7 @@ class LogAnalyzer extends StatefulWidget {
 class _LogAnalyzerState extends State<LogAnalyzer> {
   List<LogEntry> logs = [];
   List<AnalysisBlock> blocks = [];
-  String statusText = '운행기록 파일을 선택해 주세요. (.xlsx / .csv)';
+  String statusText = '운행기록 파일을 선택해 주세요. (.xls / .xlsx / .csv)';
   String summaryText = '';
   String reportText = '';
   bool isLoading = false;
@@ -263,6 +270,34 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         bytes[1] == 0xCF &&
         bytes[2] == 0x11 &&
         bytes[3] == 0xE0;
+  }
+
+  Future<List<List<dynamic>>> _readLegacyXlsRows(
+    String fileName,
+    Uint8List bytes,
+  ) async {
+    try {
+      if (!_grtcCanReadLegacyXls()) {
+        throw '구형 Excel 파서가 준비되지 않았습니다.';
+      }
+
+      final result = await _grtcReadXlsRowsFromBase64(
+        base64Encode(bytes).toJS,
+      ).toDart;
+      final dartRows = result.dartify();
+      if (dartRows is! List) {
+        throw '구형 Excel 데이터 구조를 읽을 수 없습니다.';
+      }
+      return [
+        for (final row in dartRows)
+          if (row is List)
+            row.map((cell) => cell?.toString().trim() ?? '').toList()
+          else
+            [row?.toString().trim() ?? ''],
+      ];
+    } catch (error) {
+      throw '$fileName 구형 Excel(.xls) 자동 변환에 실패했습니다. Excel에서 “다른 이름으로 저장 → Excel 통합 문서(.xlsx)”로 변환 후 업로드해 주세요. ($error)';
+    }
   }
 
   String _cellToStr(dynamic cell) {
@@ -1479,7 +1514,10 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     }
 
     final rows = <List<dynamic>>[];
-    if (bytes.length > 2 && bytes[0] == 0x50 && bytes[1] == 0x4B) {
+    if (_isXlsFile(file.name, bytes)) {
+      await _allowUiRefresh('${file.name} 구형 Excel(.xls) 파일을 변환 중입니다...');
+      rows.addAll(await _readLegacyXlsRows(file.name, bytes));
+    } else if (bytes.length > 2 && bytes[0] == 0x50 && bytes[1] == 0x4B) {
       await _allowUiRefresh('${file.name} 엑셀 파일을 읽는 중입니다...');
       final excel = Excel.decodeBytes(bytes);
       if (excel.tables.isEmpty) {
@@ -1658,15 +1696,6 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       setState(() {
         statusText = '운행기록 파일은 최대 2개까지 선택할 수 있습니다.';
       });
-      return;
-    }
-
-    final hasXlsFile = result.files.any((file) {
-      final bytes = file.bytes;
-      return bytes == null || _isXlsFile(file.name, bytes);
-    });
-    if (hasXlsFile) {
-      _showXlsWarning();
       return;
     }
 
@@ -2867,7 +2896,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                     onPressed: isLoading ? null : _pickAndAnalyze,
                     icon: const Icon(Icons.analytics_outlined),
                     label: Text(
-                      isLoading ? '분석 중...' : '운행기록 파일(.xlsx / .csv) 불러오기',
+                      isLoading
+                          ? '분석 중...'
+                          : '운행기록 파일(.xls / .xlsx / .csv) 불러오기',
                     ),
                     style: ElevatedButton.styleFrom(
                       minimumSize: const Size(double.infinity, 55),
@@ -2930,7 +2961,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         Text(
-                          '운행기록 원본이 Excel 97-2003(.xls) 형식인 경우,\nExcel에서 “다른 이름으로 저장 → Excel 통합 문서(.xlsx)”로 변환 후 업로드해 주세요.',
+                          'Excel 97-2003(.xls) 운행기록도 직접 업로드할 수 있습니다.\n분석이 실패하거나 오래 걸리면 Excel 통합 문서(.xlsx)로 변환 후 업로드해 주세요.',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             fontSize: 12,
@@ -2959,7 +2990,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                               Text(
                                 '제작자: 강경현',
                                 style: const TextStyle(
-                                  fontSize: 13.5,
+                                  fontSize: 13,
                                   color: Colors.black,
                                   fontWeight: FontWeight.w700,
                                 ),
@@ -2967,7 +2998,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                               Text(
                                 '검토: 김정주',
                                 style: const TextStyle(
-                                  fontSize: 13.5,
+                                  fontSize: 13,
                                   color: Colors.black,
                                   fontWeight: FontWeight.w700,
                                 ),
@@ -3321,30 +3352,6 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
               ),
           ],
         ),
-      ),
-    );
-  }
-
-  void _showXlsWarning() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.warning_amber_rounded, color: Colors.orange),
-            SizedBox(width: 8),
-            Text('구형 파일 감지'),
-          ],
-        ),
-        content: const Text(
-          '운행기록 원본이 Excel 97-2003(.xls) 형식인 경우,\nExcel에서 “다른 이름으로 저장 → Excel 통합 문서(.xlsx)”로 변환 후 업로드해 주세요.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('확인'),
-          ),
-        ],
       ),
     );
   }
