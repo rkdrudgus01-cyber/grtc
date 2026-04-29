@@ -31,6 +31,7 @@ enum IncidentType {
   doorOpenFailure,
   doorBypass,
   ncodeEmergency,
+  tractionNoSpeed,
   brake,
   modeChange,
   doorFlow,
@@ -62,6 +63,8 @@ const Duration kDoorBypassHoldWarnDuration = Duration(seconds: 3);
 const Duration kDepartureMovementConfirmDuration = Duration(seconds: 3);
 const Duration kModeConflictConfirmDuration = Duration(seconds: 3);
 const Duration kSignalSpikeIgnoreDuration = Duration(seconds: 3);
+const Duration kTractionNoSpeedConfirmDuration = Duration(seconds: 3);
+const double kTractionCommandThreshold = 20.0;
 const int kUiYieldInterval = 250;
 
 const List<int> kEffectiveDoorCars = [0, 1, 2, 7];
@@ -94,7 +97,7 @@ const Map<String, String> kSignalDisplayNames = {
   'FSBR': '전상용제동(FSB) 체결',
   'DPT-PM': '출발 허가',
   'EMPB': '비상제동 버튼 취급',
-  'EBCOS': '비상제동 차단 버튼',
+  'EBCOS': '비상제동차단스위치',
   'AUTO': '자동운전',
   'DRIVL': '무인운전',
   'MANUAL': '수동운전',
@@ -108,8 +111,9 @@ const Map<String, String> kSignalDisplayNames = {
   'FOR WAR': '전방예고',
   'PBR': '주차제동 완해',
   'SBS': '보안제동 취급',
-  'CRPB': '강제완해 푸쉬버튼',
+  'CRPB': '강제완해스위치',
   'PBPS': '주차제동 압력스위치',
+  'TCMS-EMTRIP': '비상전원차단',
 };
 
 const Map<int, String> kStationNames = {
@@ -344,12 +348,18 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final s = (cv is TextCellValue)
         ? (cv.value.text ?? '').trim()
         : cv.toString().trim();
-    return (int.tryParse(s) ?? 0) != 0 ? '1' : '0';
+    return (int.tryParse(s) ?? double.tryParse(s)?.toInt() ?? 0) != 0
+        ? '1'
+        : '0';
   }
 
   double _getDouble(List<dynamic> row, int idx) {
     if (idx == -1 || idx >= row.length) return 0;
-    return double.tryParse(_cellToStr(row[idx])) ?? 0;
+    final text = _cellToStr(row[idx]);
+    final parsed = double.tryParse(text);
+    if (parsed != null) return parsed;
+    final match = RegExp(r'[-+]?\d+(?:\.\d+)?').firstMatch(text);
+    return match == null ? 0 : double.tryParse(match.group(0)!) ?? 0;
   }
 
   bool _isRisingEdge(List<dynamic> prev, List<dynamic> curr, int idx) {
@@ -786,6 +796,53 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
 
   String _signalName(String key) => kSignalDisplayNames[key] ?? key;
 
+  String _stateChangeSignalMessage(String key, bool active) {
+    switch (key) {
+      case 'CRPB':
+        return active ? '강제완해스위치 취급' : '강제완해스위치 해제';
+      case 'EBCOS':
+        return active ? '비상제동차단스위치 취급' : '비상제동차단스위치 해제';
+      case 'TCMS-EMTRIP':
+        return active ? '비상전원차단 취급' : '비상전원차단 해제';
+      default:
+        return active
+            ? '${_signalName(key)}이 감지되었습니다.'
+            : '${_signalName(key)}이 해제되었습니다.';
+    }
+  }
+
+  String _logEntriesAsTsv(Iterable<LogEntry> entries) {
+    return entries.map((entry) => '${entry.time}\t${entry.message}').join('\n');
+  }
+
+  String _blocksAsTsv(Iterable<AnalysisBlock> blocks) {
+    final lines = <String>[];
+    for (final block in blocks) {
+      final range = _entryTimeRange(block.entries);
+      lines.add('${range.isEmpty ? '' : range}\t${block.title}');
+      for (final entry in block.entries) {
+        lines.add('${entry.time}\t${entry.message}');
+      }
+    }
+    return lines.join('\n');
+  }
+
+  String _visibleTableCopyText() {
+    return switch (viewMode) {
+      LogViewMode.summary => _blocksAsTsv(blocks),
+      LogViewMode.detail => _logEntriesAsTsv(logs),
+      LogViewMode.report => reportText,
+    };
+  }
+
+  String _visibleCopyLabel() {
+    return switch (viewMode) {
+      LogViewMode.summary => '블록 표 복사',
+      LogViewMode.detail => '상세 표 복사',
+      LogViewMode.report => '보고서 초안 복사',
+    };
+  }
+
   bool _isBlockRelevantLog(LogEntry entry) {
     return entry.isSummary ||
         entry.type == EntryType.button ||
@@ -1095,6 +1152,8 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         return '출입문 바이패스 현시/취급 정황';
       case IncidentType.ncodeEmergency:
         return '속도코드 무코드 발생 및 비상운전 흐름';
+      case IncidentType.tractionNoSpeed:
+        return '추진 불능/제동 완해 불량 정황';
       case IncidentType.brake:
         return '전상용제동(FSB) 체결 흐름';
       case IncidentType.modeChange:
@@ -1123,6 +1182,11 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     final hasNCode = messages.contains('무코드');
     final hasEmergency = messages.contains('비상운전') || messages.contains('비상모드');
     final hasFsbr = messages.contains('전상용제동(FSB) 체결');
+    final hasTractionNoSpeed = messages.contains('열차재추진, 속도 "0"');
+    final hasBrakeControlSwitch =
+        messages.contains('강제완해스위치 취급') ||
+        messages.contains('비상제동차단스위치 취급') ||
+        messages.contains('비상전원차단 취급');
     final hasMode = entries.any(
       (entry) => _isOperationModeTransitionMessage(entry.message),
     );
@@ -1130,9 +1194,13 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     if (hasDoorCloseFailure) return IncidentType.doorCloseFailure;
     if (hasDoorOpenFailure) return IncidentType.doorOpenFailure;
     if (hasDoorBypass) return IncidentType.doorBypass;
+    if (hasTractionNoSpeed && hasBrakeControlSwitch) {
+      return IncidentType.tractionNoSpeed;
+    }
     if (hasNCode && (hasFsbr || hasEmergency)) {
       return IncidentType.ncodeEmergency;
     }
+    if (hasTractionNoSpeed) return IncidentType.tractionNoSpeed;
     if (hasFsbr) return IncidentType.brake;
     if (hasMode) return IncidentType.modeChange;
     if (hasDoorFlow) return IncidentType.doorFlow;
@@ -1248,6 +1316,21 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       ),
       _reportDigestLine(
         entries: entries,
+        keywords: ['열차재추진, 속도 "0"'],
+        label: '추진 불능 정황',
+      ),
+      _reportDigestLine(
+        entries: entries,
+        keywords: ['강제완해스위치 취급'],
+        label: '강제완해스위치 취급',
+      ),
+      _reportDigestLine(
+        entries: entries,
+        keywords: ['비상전원차단 취급'],
+        label: '비상전원차단 취급',
+      ),
+      _reportDigestLine(
+        entries: entries,
         keywords: ['이동 중 ALL DOOR CLOSE'],
         label: '이동 중 출입문 닫힘 신호 해제',
       ),
@@ -1293,7 +1376,11 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         message.contains('전체 출입문 닫힘 신호가 형성되지') ||
         message.contains('불일치') ||
         message.contains('운전모드 신호 불일치') ||
-        message.contains('이동 중 ALL DOOR CLOSE')) {
+        message.contains('이동 중 ALL DOOR CLOSE') ||
+        message.contains('열차재추진, 속도 "0"') ||
+        message.contains('강제완해스위치') ||
+        message.contains('비상전원차단') ||
+        message.contains('비상제동차단스위치')) {
       return 0;
     }
     if (message.contains('무코드') ||
@@ -1338,6 +1425,10 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     if (message.contains('무코드')) return 'ncode';
     if (message.contains('전상용제동(FSB) 체결')) return 'fsb';
     if (message.contains('속도코드')) return 'speed_code';
+    if (message.contains('열차재추진, 속도 "0"')) return 'traction_no_speed';
+    if (message.contains('강제완해스위치')) return 'crpb';
+    if (message.contains('비상전원차단')) return 'emtrip';
+    if (message.contains('비상제동차단스위치')) return 'ebcos';
     if (_isOperationModeTransitionMessage(message)) return 'mode_change';
     if (message.contains('비상모드') || message.contains('비상운전')) {
       return 'emergency';
@@ -1425,6 +1516,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       _firstLine(entries, ['출입문 바이패스', '바이패스 취급'], '출입문 바이패스'),
       _firstLine(entries, ['무코드'], '속도코드 무코드 발생'),
       _firstLine(entries, ['전상용제동(FSB) 체결'], '전상용제동(FSB) 체결'),
+      _firstLine(entries, ['열차재추진, 속도 "0"'], '추진 불능 정황'),
+      _firstLine(entries, ['강제완해스위치 취급'], '강제완해스위치 취급'),
+      _firstLine(entries, ['비상전원차단 취급'], '비상전원차단 취급'),
       _firstLineWhere(entries, _isOperationModeTransitionMessage, '운전모드 전환'),
       _firstLineWhere(entries, _isDoorModeTransitionMessage, '출입문 모드 전환'),
     ].where((line) => line.isNotEmpty).toList();
@@ -1505,6 +1599,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     );
     final hasFsbr = messages.contains('전상용제동(FSB) 체결');
     final hasNCode = messages.contains('무코드');
+    final hasTractionNoSpeed = messages.contains('열차재추진, 속도 "0"');
+    final hasBrakeReleaseSwitch = messages.contains('강제완해스위치 취급');
+    final hasEmergencyPowerCut = messages.contains('비상전원차단 취급');
     final hasStop =
         messages.contains('정차 중') || messages.contains('정차가 감지되었습니다.');
     final hasDeparture =
@@ -1544,10 +1641,31 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       '출입문 바이패스',
       '바이패스 취급',
     ]);
+    final firstTractionNoSpeedTime = _firstMatchingTime(entries, [
+      '열차재추진, 속도 "0"',
+    ]);
+    final firstBrakeReleaseSwitchTime = _firstMatchingTime(entries, [
+      '강제완해스위치 취급',
+    ]);
+    final firstEmergencyPowerCutTime = _firstMatchingTime(entries, [
+      '비상전원차단 취급',
+    ]);
     final firstDepartureTime = _firstMatchingTime(entries, ['출발 허가', '발차']);
     final timeSuffix = _summaryTimeSuffix(entries);
 
     String withType(String body) => '분류: $incidentType. $body';
+    String tractionSummary() {
+      final switchText = [
+        if (hasBrakeReleaseSwitch)
+          _summaryLead(firstBrakeReleaseSwitchTime, '강제완해스위치 취급'),
+        if (hasEmergencyPowerCut)
+          _summaryLead(firstEmergencyPowerCutTime, '비상전원차단 취급'),
+      ].join();
+      return withType(
+        '${_summaryLead(firstTractionNoSpeedTime, '열차재추진')}'
+        '$switchText속도 0 유지에 따른 추진 불능 정황이 확인됩니다.$timeSuffix',
+      );
+    }
 
     if (hasDoorBypass) {
       return withType(
@@ -1564,6 +1682,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       return withType(
         '${_summaryLead(firstDoorCloseTime, '출입문 닫힘 관련 신호')}출입문 닫힘 불량 정황이 확인됩니다.$timeSuffix',
       );
+    }
+    if (hasTractionNoSpeed && (hasBrakeReleaseSwitch || hasEmergencyPowerCut)) {
+      return tractionSummary();
     }
     if (hasNCode && hasFsbr && hasMode) {
       return withType(
@@ -1589,6 +1710,9 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       return withType(
         '${_summaryLead(firstNCodeTime, '무코드 수신')}무코드 수신 $nCodeCount건 이후 전상용제동(FSB) 체결 흐름이 $fsbrCount건 확인됩니다.$timeSuffix',
       );
+    }
+    if (hasTractionNoSpeed) {
+      return tractionSummary();
     }
     if (hasDoor && hasDeparture) {
       return withType(
@@ -1970,6 +2094,8 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       final idxDist = findIdx('DIST');
       final idxNextSta = findIdx('NEXTSTA');
       final idxNCode = findIdx('NCODE');
+      final idxPowerBrake = findIdx('P/B');
+      final idxMcNotNeutral = findIdx('MC N');
       final idxFsbr = findIdx('FSBR');
       final idxFsb = idxFsbr != -1 ? idxFsbr : findIdx('FSB');
       final dptPmIndices = findIndices(['ATC1DPT-PM', 'ATC2DPT-PM', 'DPT-PM']);
@@ -2032,8 +2158,12 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
         'PAN UP': findIdx('PAN UP'),
         'PAN DN': findIdx('PAN DN'),
         'EMPB': findIdx('EMPB'),
-        'EBCOS': findIdx('EBCOS'),
       };
+      final stateChangeSignals = <String, int>{
+        'EBCOS': findIdx('EBCOS'),
+        'CRPB': findIdx('CRPB'),
+        'TCMS-EMTRIP': findIdx('TCMS-EMTRIP'),
+      }..removeWhere((_, idx) => idx == -1);
 
       final doorIdx = {for (final door in kActiveDoors) door: findIdx(door)};
       final tempLogs = <LogEntry>[];
@@ -2121,6 +2251,10 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       Duration? lastDoorBypassAt;
       bool doorBypassPending = false;
       bool doorBypassHoldLogged = false;
+      Duration tractionNoSpeedDuration = Duration.zero;
+      String? tractionNoSpeedStartTime;
+      OperationMode? tractionNoSpeedMode;
+      bool tractionNoSpeedLogged = false;
       final totalRecords = rows.length > 1 ? rows.length - 1 : 0;
 
       await _allowUiRefresh('운행기록을 분석 중입니다... (0 / $totalRecords)');
@@ -2276,6 +2410,45 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
           lastKnownMode = currentMode;
         }
 
+        final effectiveMode = currentMode == OperationMode.unknown
+            ? lastKnownMode
+            : currentMode;
+        final isManualTractionMode =
+            effectiveMode == OperationMode.manual ||
+            effectiveMode == OperationMode.emergency;
+        final hasTractionCommand =
+            idxMcNotNeutral != -1 &&
+            _getVal(curr, idxMcNotNeutral) == '1' &&
+            _getDouble(curr, idxPowerBrake) >= kTractionCommandThreshold;
+        if (isManualTractionMode &&
+            hasTractionCommand &&
+            speed <= kStopSpeedThresholdKmh) {
+          tractionNoSpeedStartTime ??= time;
+          tractionNoSpeedMode ??= effectiveMode;
+          tractionNoSpeedDuration += sampleDelta == Duration.zero
+              ? kDefaultSampleDuration
+              : sampleDelta;
+
+          if (!tractionNoSpeedLogged &&
+              tractionNoSpeedDuration >= kTractionNoSpeedConfirmDuration) {
+            tempLogs.add(
+              LogEntry(
+                time: tractionNoSpeedStartTime,
+                message:
+                    '열차재추진, 속도 "0" (${_modeLabel(tractionNoSpeedMode ?? effectiveMode!)})${_currentStationSuffix(doorLocation)}',
+                type: EntryType.bypass,
+                isSummary: true,
+              ),
+            );
+            tractionNoSpeedLogged = true;
+          }
+        } else {
+          tractionNoSpeedDuration = Duration.zero;
+          tractionNoSpeedStartTime = null;
+          tractionNoSpeedMode = null;
+          tractionNoSpeedLogged = false;
+        }
+
         if (idxEmegr != -1) {
           final rawEmegrValue = _getVal(curr, idxEmegr);
           if (rawEmegrValue != stableEmegrValue &&
@@ -2315,6 +2488,32 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
               ),
             );
           }
+        }
+
+        for (final entry in stateChangeSignals.entries) {
+          final prevValue = _getVal(prev, entry.value);
+          final currValue = _getVal(curr, entry.value);
+          if (prevValue == currValue) continue;
+          if (!_isSustainedValueAt(
+            rows,
+            i,
+            entry.value,
+            tIdx,
+            currValue,
+            kSignalSpikeIgnoreDuration,
+          )) {
+            continue;
+          }
+
+          final active = currValue == '1';
+          tempLogs.add(
+            LogEntry(
+              time: time,
+              message: _stateChangeSignalMessage(entry.key, active),
+              type: active ? EntryType.button : EntryType.restore,
+              isSummary: true,
+            ),
+          );
         }
 
         for (final entry in doorButtons.entries) {
@@ -3258,6 +3457,31 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                           ),
                         ),
                         const SizedBox(width: 8),
+                        if (viewMode != LogViewMode.report) ...[
+                          OutlinedButton.icon(
+                            onPressed: _visibleTableCopyText().isEmpty
+                                ? null
+                                : () async {
+                                    await Clipboard.setData(
+                                      ClipboardData(
+                                        text: _visibleTableCopyText(),
+                                      ),
+                                    );
+                                    if (!context.mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          '${_visibleCopyLabel()} 완료',
+                                        ),
+                                        duration: const Duration(seconds: 2),
+                                      ),
+                                    );
+                                  },
+                            icon: const Icon(Icons.copy_outlined, size: 18),
+                            label: Text(_visibleCopyLabel()),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
                         ToggleButtons(
                           isSelected: [
                             viewMode == LogViewMode.summary,
