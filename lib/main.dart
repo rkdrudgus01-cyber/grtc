@@ -1165,6 +1165,36 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     }
   }
 
+  bool _isDoorIncidentType(IncidentType type) {
+    return type == IncidentType.doorCloseFailure ||
+        type == IncidentType.doorOpenFailure ||
+        type == IncidentType.doorBypass ||
+        type == IncidentType.doorFlow;
+  }
+
+  bool _isReportNoiseForIncident(String message, IncidentType type) {
+    if (_isDoorIncidentType(type)) {
+      return message.contains('무코드') ||
+          message.contains('전상용제동(FSB) 체결') ||
+          message.contains('속도코드') ||
+          message.contains('열차재추진, 속도 "0"') ||
+          message.contains('강제완해스위치') ||
+          message.contains('비상전원차단') ||
+          message.contains('비상제동차단스위치');
+    }
+    if (type == IncidentType.ncodeEmergency || type == IncidentType.brake) {
+      return message.contains('출입문 바이패스') ||
+          message.contains('바이패스 취급') ||
+          message.contains('닫힘버튼 취급, ALL DOOR CLOSE "0"') ||
+          message.contains('열림 버튼 취급 후에도 ALL DOOR CLOSE "1" 유지') ||
+          message.contains('열차재추진, 속도 "0"') ||
+          message.contains('강제완해스위치') ||
+          message.contains('비상전원차단') ||
+          message.contains('비상제동차단스위치');
+    }
+    return false;
+  }
+
   IncidentType _classifyIncidentType(List<LogEntry> entries) {
     final messages = entries.map((entry) => entry.message).join('\n');
     final hasDoorBypass =
@@ -1278,62 +1308,87 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     return '- $label: $count건$firstText';
   }
 
-  List<String> _buildReportDigest(List<LogEntry> entries) {
+  List<String> _buildReportDigest(
+    List<LogEntry> entries, {
+    required IncidentType incidentType,
+  }) {
+    final showDoorSignals =
+        _isDoorIncidentType(incidentType) ||
+        incidentType == IncidentType.general;
+    final showNCodeSignals =
+        incidentType == IncidentType.ncodeEmergency ||
+        incidentType == IncidentType.brake ||
+        incidentType == IncidentType.tractionNoSpeed ||
+        incidentType == IncidentType.modeChange ||
+        incidentType == IncidentType.general;
+    final showTractionSignals =
+        incidentType == IncidentType.tractionNoSpeed ||
+        incidentType == IncidentType.general;
     return [
-      _reportDigestLine(
-        entries: entries,
-        keywords: ['출입문 바이패스', '바이패스 취급'],
-        label: '출입문 바이패스 현시/취급',
-      ),
-      _reportDigestLine(
-        entries: entries,
-        keywords: [
-          '전체 출입문 닫힘 신호 미형성',
-          '전체 출입문 닫힘 신호가 형성되지',
-          '닫힘버튼 취급, ALL DOOR CLOSE "0"',
-        ],
-        label: '출입문 닫히지 않음 정황',
-      ),
-      _reportDigestLine(
-        entries: entries,
-        keywords: ['출입문 열림 지연', '열림 버튼 취급 후에도 ALL DOOR CLOSE "1" 유지'],
-        label: '출입문 열림불량 정황',
-      ),
-      _reportDigestLine(
-        entries: entries,
-        keywords: ['무코드'],
-        label: '속도코드 무코드 발생',
-      ),
-      _reportDigestLine(
-        entries: entries,
-        keywords: ['전상용제동(FSB) 체결'],
-        label: '전상용제동(FSB) 체결',
-      ),
-      _reportDigestLine(
-        entries: entries,
-        keywords: ['속도코드', '과속'],
-        label: 'ATC-과속검지 정황',
-      ),
-      _reportDigestLine(
-        entries: entries,
-        keywords: ['열차재추진, 속도 "0"'],
-        label: '추진 불능 정황',
-      ),
-      _reportDigestLine(
-        entries: entries,
-        keywords: ['강제완해스위치 취급'],
-        label: '강제완해스위치 취급',
-      ),
-      _reportDigestLine(
-        entries: entries,
-        keywords: ['비상전원차단 취급'],
-        label: '비상전원차단 취급',
-      ),
-      _reportDigestLine(
-        entries: entries,
-        keywords: ['이동 중 ALL DOOR CLOSE'],
-        label: '이동 중 출입문 닫힘 신호 해제',
-      ),
+      if (showDoorSignals)
+        _reportDigestLine(
+          entries: entries,
+          keywords: ['출입문 바이패스', '바이패스 취급'],
+          label: '출입문 바이패스 현시/취급',
+        ),
+      if (showDoorSignals)
+        _reportDigestLine(
+          entries: entries,
+          keywords: [
+            '전체 출입문 닫힘 신호 미형성',
+            '전체 출입문 닫힘 신호가 형성되지',
+            '닫힘버튼 취급, ALL DOOR CLOSE "0"',
+          ],
+          label: '출입문 닫히지 않음 정황',
+        ),
+      if (showDoorSignals)
+        _reportDigestLine(
+          entries: entries,
+          keywords: ['출입문 열림 지연', '열림 버튼 취급 후에도 ALL DOOR CLOSE "1" 유지'],
+          label: '출입문 열림불량 정황',
+        ),
+      if (showNCodeSignals)
+        _reportDigestLine(
+          entries: entries,
+          keywords: ['무코드'],
+          label: '속도코드 무코드 발생',
+        ),
+      if (showNCodeSignals)
+        _reportDigestLine(
+          entries: entries,
+          keywords: ['전상용제동(FSB) 체결'],
+          label: '전상용제동(FSB) 체결',
+        ),
+      if (showNCodeSignals)
+        _reportDigestLine(
+          entries: entries,
+          keywords: ['속도코드', '과속'],
+          label: 'ATC-과속검지 정황',
+        ),
+      if (showTractionSignals)
+        _reportDigestLine(
+          entries: entries,
+          keywords: ['열차재추진, 속도 "0"'],
+          label: '추진 불능 정황',
+        ),
+      if (showTractionSignals)
+        _reportDigestLine(
+          entries: entries,
+          keywords: ['강제완해스위치 취급'],
+          label: '강제완해스위치 취급',
+        ),
+      if (showTractionSignals)
+        _reportDigestLine(
+          entries: entries,
+          keywords: ['비상전원차단 취급'],
+          label: '비상전원차단 취급',
+        ),
+      if (showDoorSignals)
+        _reportDigestLine(
+          entries: entries,
+          keywords: ['이동 중 ALL DOOR CLOSE'],
+          label: '이동 중 출입문 닫힘 신호 해제',
+        ),
       _reportDigestLine(
         entries: entries,
         keywords: ['TWC/TB'],
@@ -1447,9 +1502,15 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     return 2;
   }
 
-  List<LogEntry> _selectReportEvents(List<LogEntry> entries) {
+  List<LogEntry> _selectReportEvents(
+    List<LogEntry> entries, {
+    required IncidentType incidentType,
+  }) {
     final ranked = <({int index, LogEntry entry, int priority})>[];
     for (var i = 0; i < entries.length; i++) {
+      if (_isReportNoiseForIncident(entries[i].message, incidentType)) {
+        continue;
+      }
       final priority = _reportEventPriority(entries[i]);
       if (priority < 100) {
         ranked.add((index: i, entry: entries[i], priority: priority));
@@ -1478,6 +1539,25 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       if (selectedIndices.length >= 16) break;
     }
 
+    if (selectedIndices.length < 6 && _isDoorIncidentType(incidentType)) {
+      for (final candidate in ranked) {
+        if (candidate.priority > 3) {
+          continue;
+        }
+        if (selectedIndices.contains(candidate.index)) {
+          continue;
+        }
+        final signature = _reportEventSignature(candidate.entry.message);
+        final count = signatureCounts[signature] ?? 0;
+        if (count >= _reportEventRepeatLimit(candidate.priority)) {
+          continue;
+        }
+        selectedIndices.add(candidate.index);
+        signatureCounts[signature] = count + 1;
+        if (selectedIndices.length >= 10) break;
+      }
+    }
+
     if (selectedIndices.isEmpty) {
       for (final candidate in ranked) {
         final signature = _reportEventSignature(candidate.entry.message);
@@ -1495,40 +1575,111 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
     return orderedIndices.map((index) => entries[index]).toList();
   }
 
+  List<String> _buildSupportingReportLines(
+    List<LogEntry> entries, {
+    required IncidentType incidentType,
+  }) {
+    if (incidentType == IncidentType.general ||
+        incidentType == IncidentType.tractionNoSpeed) {
+      return const [];
+    }
+
+    final lines = <String>[];
+    void add(String line) {
+      if (line.isNotEmpty && !lines.contains(line) && lines.length < 4) {
+        lines.add(line);
+      }
+    }
+
+    if (_isDoorIncidentType(incidentType)) {
+      add(_firstLine(entries, ['열차재추진, 속도 "0"'], '보조 확인: 열차재추진, 속도 "0"'));
+      add(_firstLine(entries, ['강제완해스위치 취급'], '보조 확인: 강제완해스위치 취급'));
+      add(_firstLine(entries, ['비상전원차단 취급'], '보조 확인: 비상전원차단 취급'));
+      if (lines.isEmpty) {
+        add(_firstLine(entries, ['전상용제동(FSB) 체결'], '보조 확인: 전상용제동(FSB) 체결'));
+      }
+      return lines;
+    }
+
+    if (incidentType == IncidentType.ncodeEmergency ||
+        incidentType == IncidentType.brake) {
+      add(_firstLine(entries, ['열차재추진, 속도 "0"'], '보조 확인: 열차재추진, 속도 "0"'));
+      add(_firstLine(entries, ['강제완해스위치 취급'], '보조 확인: 강제완해스위치 취급'));
+      add(_firstLine(entries, ['비상전원차단 취급'], '보조 확인: 비상전원차단 취급'));
+      add(_firstLine(entries, ['비상제동차단스위치 취급'], '보조 확인: 비상제동차단스위치 취급'));
+    }
+
+    add(_firstLine(entries, ['출입문 바이패스', '바이패스 취급'], '보조 확인: 출입문 바이패스'));
+    add(
+      _firstLine(entries, [
+        '닫힘버튼 취급, ALL DOOR CLOSE "0"',
+        '전체 출입문 닫힘 신호가 형성되지',
+      ], '보조 확인: 출입문 닫힘 관련 신호'),
+    );
+    add(
+      _firstLine(entries, [
+        '출입문 열림 지연',
+        '열림 버튼 취급 후에도 ALL DOOR CLOSE "1" 유지',
+      ], '보조 확인: 출입문 열림 관련 신호'),
+    );
+    return lines;
+  }
+
   String _buildReportDraft(List<LogEntry> entries, List<AnalysisBlock> blocks) {
     if (entries.isEmpty) {
       return '운행기록 분석 초안\n\n감지된 주요 이벤트가 없습니다.';
     }
 
-    final incidentType = _incidentTypeLabel(_classifyIncidentType(entries));
+    final classifiedIncidentType = _classifyIncidentType(entries);
+    final incidentType = _incidentTypeLabel(classifiedIncidentType);
     final timeRange = _entryTimeRange(entries);
     final summary = _buildSummary(entries);
-    final digestLines = _buildReportDigest(entries);
+    final digestLines = _buildReportDigest(
+      entries,
+      incidentType: classifiedIncidentType,
+    );
     final firstLines = [
-      _firstLine(entries, [
-        '출입문 열림 지연',
-        '열림 버튼 취급 후에도 ALL DOOR CLOSE "1" 유지',
-      ], '출입문 열림불량 관련 신호'),
-      _firstLine(entries, [
-        '닫힘버튼 취급, ALL DOOR CLOSE "0"',
-        '전체 출입문 닫힘 신호가 형성되지',
-      ], '출입문 닫히지 않음 관련 신호'),
-      _firstLine(entries, ['출입문 바이패스', '바이패스 취급'], '출입문 바이패스'),
-      _firstLine(entries, ['무코드'], '속도코드 무코드 발생'),
-      _firstLine(entries, ['전상용제동(FSB) 체결'], '전상용제동(FSB) 체결'),
-      _firstLine(entries, ['열차재추진, 속도 "0"'], '추진 불능 정황'),
-      _firstLine(entries, ['강제완해스위치 취급'], '강제완해스위치 취급'),
-      _firstLine(entries, ['비상전원차단 취급'], '비상전원차단 취급'),
+      if (_isDoorIncidentType(classifiedIncidentType))
+        _firstLine(entries, [
+          '출입문 열림 지연',
+          '열림 버튼 취급 후에도 ALL DOOR CLOSE "1" 유지',
+        ], '출입문 열림불량 관련 신호'),
+      if (_isDoorIncidentType(classifiedIncidentType))
+        _firstLine(entries, [
+          '닫힘버튼 취급, ALL DOOR CLOSE "0"',
+          '전체 출입문 닫힘 신호가 형성되지',
+        ], '출입문 닫히지 않음 관련 신호'),
+      if (_isDoorIncidentType(classifiedIncidentType))
+        _firstLine(entries, ['출입문 바이패스', '바이패스 취급'], '출입문 바이패스'),
+      if (classifiedIncidentType == IncidentType.ncodeEmergency ||
+          classifiedIncidentType == IncidentType.brake ||
+          classifiedIncidentType == IncidentType.tractionNoSpeed)
+        _firstLine(entries, ['무코드'], '속도코드 무코드 발생'),
+      if (classifiedIncidentType == IncidentType.ncodeEmergency ||
+          classifiedIncidentType == IncidentType.brake ||
+          classifiedIncidentType == IncidentType.tractionNoSpeed)
+        _firstLine(entries, ['전상용제동(FSB) 체결'], '전상용제동(FSB) 체결'),
+      if (classifiedIncidentType == IncidentType.tractionNoSpeed)
+        _firstLine(entries, ['열차재추진, 속도 "0"'], '추진 불능 정황'),
+      if (classifiedIncidentType == IncidentType.tractionNoSpeed)
+        _firstLine(entries, ['강제완해스위치 취급'], '강제완해스위치 취급'),
+      if (classifiedIncidentType == IncidentType.tractionNoSpeed)
+        _firstLine(entries, ['비상전원차단 취급'], '비상전원차단 취급'),
       _firstLineWhere(entries, _isOperationModeTransitionMessage, '운전모드 전환'),
       _firstLineWhere(entries, _isDoorModeTransitionMessage, '출입문 모드 전환'),
     ].where((line) => line.isNotEmpty).toList();
 
-    final summaryEntries = _selectReportEvents(entries)
-        .map(
-          (entry) =>
-              '- ${entry.time == '-' ? '' : '${entry.time} '}${entry.message}',
-        )
-        .toList();
+    final summaryEntries =
+        _selectReportEvents(entries, incidentType: classifiedIncidentType)
+            .map(
+              (entry) =>
+                  '- ${entry.time == '-' ? '' : '${entry.time} '}${entry.message}',
+            )
+            .toList();
+    final supportingLines = _buildSupportingReportLines(
+      entries,
+      incidentType: classifiedIncidentType,
+    );
     final blockLines = blocks.take(6).map((block) {
       final range = _entryTimeRange(block.entries);
       return '- ${block.title}${range.isEmpty ? '' : ' ($range)'}';
@@ -1554,10 +1705,13 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
       if (summaryEntries.isNotEmpty) '5. 주요 이벤트',
       if (summaryEntries.isNotEmpty) ...summaryEntries,
       if (summaryEntries.isNotEmpty) '',
-      if (blockLines.isNotEmpty) '6. 블록 흐름',
+      if (supportingLines.isNotEmpty) '6. 보조 확인 신호',
+      if (supportingLines.isNotEmpty) ...supportingLines,
+      if (supportingLines.isNotEmpty) '',
+      if (blockLines.isNotEmpty) '7. 블록 흐름',
       if (blockLines.isNotEmpty) ...blockLines,
       if (blockLines.isNotEmpty) '',
-      '7. 유의사항',
+      '8. 유의사항',
       '- 본 초안은 운행기록 기반의 사건 흐름 정리이며, 원인 확정 또는 조치 지시가 아닙니다.',
       '- 필요 시 현장 확인 결과와 정비 기록을 함께 대조해야 합니다.',
     ].join('\n');
