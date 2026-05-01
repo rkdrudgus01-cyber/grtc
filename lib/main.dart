@@ -3733,136 +3733,144 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
                           ],
                         )
                       : viewMode == LogViewMode.summary
-                      ? ListView.builder(
-                          itemCount: blocks.length,
-                          itemBuilder: (context, index) {
-                            final block = blocks[index];
-                            final color = _blockColor(block.type);
-                            final icon = _blockIcon(block.type);
-                            final timeRange = _entryTimeRange(block.entries);
+                      ? SelectionArea(
+                          child: ListView.builder(
+                            itemCount: blocks.length,
+                            itemBuilder: (context, index) {
+                              final block = blocks[index];
+                              final color = _blockColor(block.type);
+                              final icon = _blockIcon(block.type);
+                              final timeRange = _entryTimeRange(block.entries);
 
-                            return Card(
-                              margin: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 5,
-                              ),
-                              elevation: 0,
-                              shape: RoundedRectangleBorder(
-                                side: BorderSide(
-                                  color: color.withValues(alpha: 0.25),
+                              return Card(
+                                margin: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 5,
                                 ),
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              color: color.withValues(alpha: 0.05),
-                              child: Padding(
-                                padding: const EdgeInsets.all(12),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        Icon(icon, color: color, size: 20),
-                                        const SizedBox(width: 8),
-                                        Expanded(
-                                          child: SelectableText(
-                                            block.title,
-                                            style: TextStyle(
-                                              color: color,
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                        ),
-                                        if (timeRange.isNotEmpty)
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 8,
-                                              vertical: 3,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              color: color.withValues(
-                                                alpha: 0.10,
-                                              ),
-                                              borderRadius:
-                                                  BorderRadius.circular(12),
-                                            ),
+                                elevation: 0,
+                                shape: RoundedRectangleBorder(
+                                  side: BorderSide(
+                                    color: color.withValues(alpha: 0.25),
+                                  ),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                color: color.withValues(alpha: 0.05),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Icon(icon, color: color, size: 20),
+                                          const SizedBox(width: 8),
+                                          Expanded(
                                             child: Text(
-                                              timeRange,
+                                              block.title,
                                               style: TextStyle(
                                                 color: color,
-                                                fontSize: 11,
-                                                fontWeight: FontWeight.w600,
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.w700,
                                               ),
                                             ),
                                           ),
-                                      ],
-                                    ),
-                                    if (block.entries.isNotEmpty)
-                                      const SizedBox(height: 8),
-                                    ...block.entries.map(
-                                      (entry) => Padding(
-                                        padding: const EdgeInsets.only(top: 4),
-                                        child: SelectableText(
-                                          '• ${entry.message}',
-                                          style: const TextStyle(
-                                            fontSize: 13,
-                                            color: Colors.black87,
+                                          if (timeRange.isNotEmpty)
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 8,
+                                                    vertical: 3,
+                                                  ),
+                                              decoration: BoxDecoration(
+                                                color: color.withValues(
+                                                  alpha: 0.10,
+                                                ),
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                              ),
+                                              child: Text(
+                                                timeRange,
+                                                style: TextStyle(
+                                                  color: color,
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                      if (block.entries.isNotEmpty)
+                                        const SizedBox(height: 8),
+                                      ...block.entries.map(
+                                        (entry) => Padding(
+                                          padding: const EdgeInsets.only(
+                                            top: 4,
+                                          ),
+                                          child: Text(
+                                            '• ${entry.message}',
+                                            style: const TextStyle(
+                                              fontSize: 13,
+                                              color: Colors.black87,
+                                            ),
                                           ),
                                         ),
                                       ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        )
-                      : ListView.builder(
-                          itemCount: logs.length,
-                          itemBuilder: (context, index) {
-                            final entry = logs[index];
-                            final color = switch (entry.type) {
-                              EntryType.bypass => Colors.red,
-                              EntryType.restore => Colors.green,
-                              EntryType.button => Colors.orange,
-                              EntryType.info => Colors.blue,
-                            };
-                            final icon = switch (entry.type) {
-                              EntryType.bypass => Icons.warning_amber_rounded,
-                              EntryType.restore => Icons.check_circle_outline,
-                              EntryType.button => Icons.touch_app_outlined,
-                              EntryType.info => Icons.directions_subway,
-                            };
-
-                            return Card(
-                              margin: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 3,
-                              ),
-                              elevation: 0,
-                              shape: RoundedRectangleBorder(
-                                side: BorderSide(
-                                  color: color.withValues(alpha: 0.3),
-                                ),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              color: color.withValues(alpha: 0.05),
-                              child: ListTile(
-                                dense: true,
-                                leading: Icon(icon, color: color, size: 22),
-                                title: SelectableText(
-                                  '[${entry.time}] ${entry.message}',
-                                  style: TextStyle(
-                                    color: Colors.black87,
-                                    fontSize: 13,
-                                    fontWeight: entry.type == EntryType.bypass
-                                        ? FontWeight.bold
-                                        : FontWeight.normal,
+                                    ],
                                   ),
                                 ),
-                              ),
-                            );
-                          },
+                              );
+                            },
+                          ),
+                        )
+                      : SelectionArea(
+                          child: ListView.builder(
+                            itemCount: logs.length,
+                            itemBuilder: (context, index) {
+                              final entry = logs[index];
+                              final color = switch (entry.type) {
+                                EntryType.bypass => Colors.red,
+                                EntryType.restore => Colors.green,
+                                EntryType.button => Colors.orange,
+                                EntryType.info => Colors.blue,
+                              };
+                              final icon = switch (entry.type) {
+                                EntryType.bypass => Icons.warning_amber_rounded,
+                                EntryType.restore => Icons.check_circle_outline,
+                                EntryType.button => Icons.touch_app_outlined,
+                                EntryType.info => Icons.directions_subway,
+                              };
+
+                              return Card(
+                                margin: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 3,
+                                ),
+                                elevation: 0,
+                                shape: RoundedRectangleBorder(
+                                  side: BorderSide(
+                                    color: color.withValues(alpha: 0.3),
+                                  ),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                color: color.withValues(alpha: 0.05),
+                                child: ListTile(
+                                  dense: true,
+                                  leading: Icon(icon, color: color, size: 22),
+                                  title: Text(
+                                    '[${entry.time}] ${entry.message}',
+                                    style: TextStyle(
+                                      color: Colors.black87,
+                                      fontSize: 13,
+                                      fontWeight: entry.type == EntryType.bypass
+                                          ? FontWeight.bold
+                                          : FontWeight.normal,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                         ),
                 ),
               ],
