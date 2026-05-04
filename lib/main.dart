@@ -87,7 +87,7 @@ const Map<String, String> kSignalDisplayNames = {
   'S_OPEN-R': '사이드 우측 문열림 버튼 취급',
   'S_CLOSE': '사이드 문닫힘 버튼 취급',
   'S_REOPEN': '사이드 재개폐 버튼 취급',
-  'ADBS': '전차 출입문 바이패스',
+  'ADBS': '전체 출입문 바이패스',
   'DOOR0': '0호차 출입문 바이패스 신호',
   'DOOR1': '1호차 출입문 바이패스 신호',
   'DOOR2': '2호차 출입문 바이패스 신호',
