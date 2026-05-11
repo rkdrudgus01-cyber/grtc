@@ -2162,7 +2162,7 @@ class _LogAnalyzerState extends State<LogAnalyzer> {
   }
 
   Future<void> _pickAndAnalyze() async {
-    final result = await FilePicker.pickFiles(
+    final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['xlsx', 'csv', 'xls'],
       allowMultiple: true,
@@ -4092,3 +4092,4 @@ class _Badge extends StatelessWidget {
     );
   }
 }
+
