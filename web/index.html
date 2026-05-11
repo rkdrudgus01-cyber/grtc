@@ -23,14 +23,16 @@
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="grtc 운행로그 분석기">
+  <meta name="apple-mobile-web-app-title" content="grtc_dial_generator">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png"/>
 
-  <title>grtc 운행로그 분석기</title>
+  <title>grtc_dial_generator</title>
   <link rel="manifest" href="manifest.json">
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="legacy_xls_reader.js"></script>
 </head>
 <body>
   <!--
@@ -41,8 +43,6 @@
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
-  <script src="vendor/xlsx.full.min.js"></script>
-  <script src="grtc_xls.js"></script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
