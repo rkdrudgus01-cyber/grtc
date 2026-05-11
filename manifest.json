@@ -1,11 +1,11 @@
 {
-    "name": "grtc 운행로그 분석기",
-    "short_name": "grtc 운행로그 분석기",
+    "name": "grtc_dial_generator",
+    "short_name": "grtc_dial_generator",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "광주교통공사 운행로그 분석기",
+    "description": "A new Flutter project.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
